@@ -42,9 +42,12 @@ pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress
     // violation spots seen in earlier rounds (layer, point, times)
     let mut seen: Vec<(Option<usize>, crate::geom::P, u32)> = Vec::new();
     let mut best_state: Option<crate::topo::State> = None;
+    // the feedback rounds work on the plain rubber band; gap equalisation is a final
+    // post-processing step on the best topology
+    let tight = Rules { centering: None, ..rules.clone() };
     for round in 0..rounds.max(1) {
         done_rounds = round + 1;
-        let geo = realize(&r, pb, rules);
+        let geo = realize(&r, pb, &tight);
         let rep = drc::check(board, pb, rules, &geo);
         let unrouted = r.st.conns.iter().filter(|c| !c.routed).count();
         let sc = score(&rep, &geo, unrouted);
@@ -114,7 +117,50 @@ pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress
         r.minimise_vias();
         r.improve(1);
     }
-    let (_, mut geo, mut drc, stats) = best.unwrap();
+    let (best_sc, mut geo, mut drc, stats) = best.unwrap();
+    // gap equalisation on the best geometry; it must not cost a rule: on a layer where it
+    // adds violations the tight tracks are kept
+    if rules.centering.is_some() {
+        let tight_tracks = geo.tracks.clone();
+        crate::geometry::equalise(&r, pb, rules, &mut geo);
+        let mut crep = drc::check(board, pb, rules, &geo);
+        let per_layer = |rep: &Report, tracks: &[crate::geometry::Track]| {
+            let mut n = vec![0usize; board.layers.len()];
+            for v in &rep.violations {
+                if let Some(l) = v.layer.or(v.track.map(|(ti, _)| tracks[ti].layer)) {
+                    n[l] += 1;
+                }
+            }
+            n
+        };
+        let (before, after) = (per_layer(&drc, &tight_tracks), per_layer(&crep, &geo.tracks));
+        let worse: Vec<usize> = (0..board.layers.len()).filter(|&l| after[l] > before[l]).collect();
+        if !worse.is_empty() {
+            let mut merged: Vec<crate::geometry::Track> = geo.tracks.drain(..).filter(|t| !worse.contains(&t.layer)).collect();
+            merged.extend(tight_tracks.iter().filter(|t| worse.contains(&t.layer)).cloned());
+            geo.tracks = merged;
+            crep = drc::check(board, pb, rules, &geo);
+            let names: Vec<&str> = worse.iter().map(|&l| board.layers[l].name.as_str()).collect();
+            progress(&format!("gap equalisation kept off {:?}: it added violations there", names));
+        }
+        let unrouted = r.st.conns.iter().filter(|c| !c.routed).count();
+        let sc = score(&crep, &geo, unrouted);
+        if (sc.0, sc.1) <= (best_sc.0, best_sc.1) {
+            let radar = rules.centering.unwrap();
+            progress(&format!(
+                "gap equalisation (radar: equal gaps up to {:.2} mm between pads, none from {:.2} mm): {} violations, length {:.1} -> {:.1} mm",
+                radar.full,
+                radar.range,
+                crep.violations.len(),
+                best_sc.3 as f64 / 10.0,
+                sc.3 as f64 / 10.0
+            ));
+            drc = crep;
+        } else {
+            progress(&format!("gap equalisation dropped: {} violations instead of {}", crep.violations.len(), drc.violations.len()));
+            geo.tracks = tight_tracks;
+        }
+    }
     // length matching on the final geometry
     let tuning = if !rules.length_groups.is_empty() || !rules.diff_pairs.is_empty() {
         let t = crate::tuning::tune(board, pb, rules, &mut geo);

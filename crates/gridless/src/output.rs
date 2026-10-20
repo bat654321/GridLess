@@ -19,7 +19,15 @@ pub fn items(b: &Board, g: &Geometry, rules: &Rules) -> Vec<OutItem> {
                     }
                 }
                 Prim::Arc(a) => {
-                    if a.len() > 1e-6 {
+                    // an arc that is practically straight (sagitta below 1 um) goes out as a
+                    // segment: KiCad's connectivity misjudges such slivers as dangling, and
+                    // the deviation stays well inside GEOM_MARGIN
+                    let sagitta = a.r * (1.0 - (a.sweep.abs() / 2.0).cos());
+                    if sagitta < 1e-3 {
+                        if a.start().dist(a.end()) > 1e-6 {
+                            out.push(OutItem::Seg { layer: layer.clone(), net: net.clone(), width, a: a.start(), b: a.end() });
+                        }
+                    } else if a.len() > 1e-6 {
                         out.push(OutItem::Arc { layer: layer.clone(), net: net.clone(), width, s: a.start(), m: a.mid(), e: a.end() });
                     }
                 }

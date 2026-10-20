@@ -44,12 +44,17 @@ pub struct GWire {
     /// per chord: corner vertex wrapped (NONE for chords touching a terminal) and arc radius
     pub corner: Vec<u32>,
     pub rho: Vec<f64>,
+    /// per chord: larger radius around its corner that runs through the centring slots
+    /// (see `soft_r` for how it is applied)
+    pub crho: Vec<f64>,
     /// differential pair: (partner net, centre distance) when this wire follows its partner
     pub follow: Option<(NetId, f64)>,
     /// track width used on the first / last chord (neck-down into small pads)
     pub neck: [f64; 2],
     /// actual width of every chord (auto neck-down where room is short)
     pub cw: Vec<f64>,
+    /// per crossing: window around its equal-gap slot between two pads (centring)
+    pub win: Vec<Option<(f64, f64)>>,
 }
 
 impl GWire {
@@ -124,6 +129,9 @@ pub struct LayerGeom {
     pub tri_obs: Vec<Vec<u32>>,
     /// per triangle: board outline segments close to it
     pub tri_out: Vec<Vec<(P, P)>>,
+    /// per edge running between the copper of two obstacles: copper extent of each end
+    /// along the edge (filled in for centring)
+    pub walls: Vec<Option<[f64; 2]>>,
     pub rules: Rules,
 }
 
@@ -137,6 +145,17 @@ fn chord_pieces(a: P, b: P, wrap: Option<(P, f64)>) -> ([(P, P); 2], usize, Opti
         }
     }
     ([(a, b), (b, b)], 1, None)
+}
+
+/// Radius to bend around the obstacle at q: the centring radius `soft`, shrunk to the
+/// distance of a chord end that lies inside it, but never below the rule radius `hard`
+/// (continuous in the end positions, so the relaxation sees no jumps).
+fn soft_r(hard: f64, soft: f64, q: P, a: P, b: P) -> f64 {
+    if soft > hard {
+        hard.max(soft.min(a.dist(q)).min(b.dist(q)))
+    } else {
+        hard
+    }
 }
 
 /// Shortest path P->Q around disk (c, rho) inside the wedge at c: (length, tangent points).
@@ -328,6 +347,7 @@ impl LayerGeom {
                 if corner == NONE {
                     self.wires[wi as usize].corner[k] = NONE;
                     self.wires[wi as usize].rho[k] = 0.0;
+                    self.wires[wi as usize].crho[k] = 0.0;
                     continue;
                 }
                 // depth: distance of the crossing on e1 from the corner
@@ -352,13 +372,70 @@ impl LayerGeom {
                     }
                     let a = self.wpt(o, kj as usize);
                     let b = self.wpt(o, kj as usize + 1);
-                    let d = o.rho[kj as usize].max(point_seg_dist(cp, a, b));
+                    let d = self.corner_r(o, kj as usize, cp, a, b).max(point_seg_dist(cp, a, b));
                     rho = rho.max(d + o.cw[kj as usize] / 2.0 + gclr(rules, Some(w.net), Some(o.net)) + wk / 2.0);
                 }
+                let crho = self.center_rho(w, k as usize, c);
                 let wm = &mut self.wires[wi as usize];
                 wm.corner[k as usize] = c;
                 wm.rho[k as usize] = rho;
+                wm.crho[k as usize] = crho;
             }
+        }
+    }
+
+    /// Radius chord k of wire w (ends a, b) uses around its own corner at cp.
+    fn corner_r(&self, w: &GWire, k: usize, cp: P, a: P, b: P) -> f64 {
+        soft_r(w.rho[k], w.crho[k], cp, a, b)
+    }
+
+    /// Soft push of the ends of chord k out of the centring disks of its triangle's
+    /// corners, so that the free crossings make room for the centring arcs.
+    fn center_pen(&self, w: &GWire, k: usize, a: P, b: P) -> f64 {
+        let n = w.xe.len();
+        let windowed = |x: usize| x < n && w.win[x].is_some();
+        let t = w.tris[k];
+        if t == NONE || !(windowed(k.wrapping_sub(1)) || windowed(k)) {
+            return 0.0;
+        }
+        let mut pen = 0.0;
+        for &v in &self.mesh.tris[t as usize].v {
+            if (k == 0 && v == w.sv) || (k == n && v == w.ev) || self.obs_rho_w(w, v, &self.rules, w.cw[k]) <= 0.0 {
+                continue;
+            }
+            let rc = if v == w.corner[k] { w.crho[k] } else { self.center_rho(w, k, v) };
+            let q = self.vpos(v);
+            for e in [a, b] {
+                pen += (rc - e.dist(q)).max(0.0);
+            }
+        }
+        10.0 * pen
+    }
+
+    /// Radius at which chord k of wire w passes the obstacle at vertex c so that it runs
+    /// through the centring windows of its end crossings on the edges at c (0 if none).
+    /// Bends at a gap slot thus become arcs around the pad instead of kinks: the arcs
+    /// around the two pads of a gap touch exactly at its middle.
+    fn center_rho(&self, w: &GWire, k: usize, c: u32) -> f64 {
+        let mut r = f64::INFINITY;
+        // chord k runs from crossing k-1 to crossing k
+        for x in [k.wrapping_sub(1), k] {
+            if x >= w.xe.len() {
+                continue;
+            }
+            if let Some((lo, hi)) = w.win[x] {
+                let ed = &self.mesh.edges[w.xe[x] as usize];
+                if ed.v[0] == c {
+                    r = r.min(lo);
+                } else if ed.v[1] == c {
+                    r = r.min(ed.len - hi);
+                }
+            }
+        }
+        if r.is_finite() {
+            r
+        } else {
+            0.0
         }
     }
 
@@ -369,8 +446,9 @@ impl LayerGeom {
         let c = w.corner[k];
         if c != NONE {
             let cp = self.vpos(c);
-            if around(a, b, cp, w.rho[k]).1.is_some() {
-                return Some((cp, w.rho[k]));
+            let r = self.corner_r(w, k, cp, a, b);
+            if around(a, b, cp, r).1.is_some() {
+                return Some((cp, r));
             }
         }
         let t = w.tris[k];
@@ -388,6 +466,7 @@ impl LayerGeom {
                 continue;
             }
             let q = self.vpos(v);
+            let r = soft_r(r, self.center_rho(w, k, v), q, a, b);
             let depth = r - point_seg_dist(q, a, b);
             if depth > 1e-7 && a.dist(q) >= r - 1e-7 && b.dist(q) >= r - 1e-7 && best.map_or(true, |bb| depth > bb.0) {
                 best = Some((depth, q, r));
@@ -456,10 +535,163 @@ impl LayerGeom {
     }
 
     fn chord_len(&self, w: &GWire, k: usize, a: P, b: P) -> f64 {
-        match self.chord_wrap(w, k, a, b) {
+        let l = match self.chord_wrap(w, k, a, b) {
             Some((c, r)) => around(a, b, c, r).0,
             None => a.dist(b),
+        };
+        l + self.center_pen(w, k, a, b)
+    }
+
+    /// Sine of the angle at which wire w crosses the edge of crossing k (clamped, so that
+    /// spacings measured along the edge stay finite for glancing crossings).
+    fn cross_sin(&self, w: &GWire, k: usize) -> f64 {
+        let ed = &self.mesh.edges[w.xe[k] as usize];
+        let ev = (self.vpos(ed.v[1]) - self.vpos(ed.v[0])).norm();
+        let d = (self.wpt(w, k + 2) - self.wpt(w, k)).norm();
+        d.cross(ev).abs().max(0.25)
+    }
+
+    /// Centring windows. On every edge that runs between the copper of two obstacles the
+    /// crossings get equal-gap slots (pad - track - ... - track - pad); each gap is at least
+    /// its own clearance rule and the rest of the room is shared equally ("water filling").
+    /// The radar turns the resulting gap into a weight: a crossing may leave its slot only
+    /// by (1 - weight) of its spare room, so narrow gaps pin the tracks to the slots and
+    /// wide ones leave the rubber band free. Pair partners move as one block.
+    fn update_windows(&mut self, rules: &Rules, radar: &crate::config::Centering) {
+        for w in self.wires.iter_mut() {
+            w.win.iter_mut().for_each(|x| *x = None);
         }
+        let mut out: Vec<(u32, u32, (f64, f64))> = Vec::new();
+        for e in 0..self.edge_x.len() {
+            let list = &self.edge_x[e];
+            let ext = match self.walls[e] {
+                Some(x) if !list.is_empty() => x,
+                _ => continue,
+            };
+            let ed = &self.mesh.edges[e];
+            let wall_net = |end: usize| self.mesh.verts[ed.v[end] as usize].obs.and_then(|o| self.mesh.obs[o as usize].net);
+            let el: Vec<(&GWire, usize)> = list.iter().map(|&(wi, k)| (&self.wires[wi as usize], k as usize)).collect();
+            let n = el.len();
+            let own = |w: &GWire, net: Option<NetId>| net.is_some() && (net == Some(w.net) || net == w.net2);
+            // a same-net neighbour is no wall to keep away from
+            if own(el[0].0, wall_net(0)) || own(el[n - 1].0, wall_net(1)) || el.windows(2).any(|p| Self::same_net(p[0].0, p[1].0)) {
+                continue;
+            }
+            // the radar looks at the copper-to-copper distance between the two pads
+            let wt = radar.weight(ed.len - ext[0] - ext[1]);
+            if wt <= 0.0 {
+                continue;
+            }
+            // Gaps are measured across the tracks: track i crosses at distance x_i from v0
+            // under an angle with sine s_i; a pad is taken as a disk of its copper extent
+            // along the edge. Gap j lies before track j (gap n after the last one):
+            //   x_0 = (ext0 + w_0/2 + g_0) / s_0
+            //   x_i = x_(i-1) + (w_(i-1)/2 + g_i + w_i/2) / m_i,   m_i = min(s_(i-1), s_i)
+            //   len - x_(n-1) = (ext1 + w_(n-1)/2 + g_n) / s_(n-1)
+            // so sum(a_j g_j) = room. Pair partners keep their centre distance.
+            let sins: Vec<f64> = el.iter().map(|&(w, k)| self.cross_sin(w, k)).collect();
+            let wid: Vec<f64> = el.iter().map(|&(w, k)| w.cw[k].max(w.cw[k + 1])).collect();
+            let mut coef = vec![0.0; n + 1];
+            let mut need = vec![0.0; n + 1];
+            let mut pair: Vec<Option<f64>> = vec![None; n + 1];
+            coef[0] = 1.0 / sins[0];
+            coef[n] = 1.0 / sins[n - 1];
+            need[0] = gclr(rules, Some(el[0].0.net), wall_net(0));
+            need[n] = gclr(rules, Some(el[n - 1].0.net), wall_net(1));
+            let mut room = ed.len - (ext[0] + wid[0] / 2.0) / sins[0] - (ext[1] + wid[n - 1] / 2.0) / sins[n - 1];
+            for i in 1..n {
+                let (a, b) = (el[i - 1].0, el[i].0);
+                coef[i] = 1.0 / sins[i - 1].min(sins[i]);
+                need[i] = gclr(rules, Some(a.net), Some(b.net));
+                pair[i] = match (a.follow, b.follow) {
+                    (_, Some((pn, d))) if pn == a.net => Some(d),
+                    (Some((pn, d)), _) if pn == b.net => Some(d),
+                    _ => None,
+                };
+                room -= coef[i] * pair[i].unwrap_or((wid[i - 1] + wid[i]) / 2.0);
+            }
+            // water filling: every gap gets at least its own clearance rule, the gaps whose
+            // rule is below the common level share the rest equally
+            let mut free: Vec<usize> = (0..=n).filter(|&j| pair[j].is_none()).collect();
+            let mut level;
+            loop {
+                let a: f64 = free.iter().map(|&j| coef[j]).sum();
+                if free.is_empty() || a <= 0.0 {
+                    level = f64::NAN;
+                    break;
+                }
+                level = room / a;
+                let (over, rest): (Vec<usize>, Vec<usize>) = free.iter().partition(|&&j| need[j] > level);
+                if over.is_empty() {
+                    break;
+                }
+                room -= over.iter().map(|&j| coef[j] * need[j]).sum::<f64>();
+                free = rest;
+            }
+            // spare room (across the track) of the tightest equal-share gap
+            let spare = free.iter().map(|&j| level - need[j]).fold(f64::INFINITY, f64::min);
+            if !(spare >= 0.0) || !level.is_finite() {
+                continue; // not even the rules fit: plain bounds decide
+            }
+            let gap = |j: usize| need[j].max(level);
+            let mut x = (ext[0] + wid[0] / 2.0 + gap(0)) / sins[0];
+            for i in 0..n {
+                if i > 0 {
+                    x += coef[i] * pair[i].unwrap_or((wid[i - 1] + wid[i]) / 2.0 + gap(i));
+                }
+                let half = (1.0 - wt) * spare / sins[i];
+                out.push((list[i].0, list[i].1, (x - half, x + half)));
+            }
+        }
+        for (wi, k, x) in out {
+            self.wires[wi as usize].win[k as usize] = Some(x);
+        }
+        // a wire that bends around a pad crosses a fan of edges at it; it keeps from the pad
+        // the distance of the narrowest gap of the fan (one arc), not the middle of every
+        // edge (the middle of a pin cell's diagonal lies further out and would add kinks)
+        for wi in 0..self.wires.len() {
+            let n = self.wires[wi].xe.len();
+            let mut k = 1;
+            while k < n {
+                let c = self.shared_vertex(self.wires[wi].xe[k - 1], self.wires[wi].xe[k]);
+                if c == NONE {
+                    k += 1;
+                    continue;
+                }
+                // run of crossings k0..=k1 on edges at c
+                let k0 = k - 1;
+                let mut k1 = k;
+                while k1 + 1 < n && self.mesh.edges[self.wires[wi].xe[k1 + 1] as usize].v.contains(&c) {
+                    k1 += 1;
+                }
+                let near = |x: usize| -> Option<f64> {
+                    let w = &self.wires[wi];
+                    let (lo, hi) = w.win[x]?;
+                    let ed = &self.mesh.edges[w.xe[x] as usize];
+                    Some(if ed.v[0] == c { lo } else { ed.len - hi })
+                };
+                if let Some(r) = (k0..=k1).filter_map(near).reduce(f64::min) {
+                    for x in k0..=k1 {
+                        let len = self.mesh.edges[self.wires[wi].xe[x] as usize].len;
+                        let at_v0 = self.mesh.edges[self.wires[wi].xe[x] as usize].v[0] == c;
+                        if let Some((lo, hi)) = self.wires[wi].win[x].as_mut() {
+                            if at_v0 {
+                                *lo = lo.min(r);
+                            } else {
+                                *hi = hi.max(len - r);
+                            }
+                        }
+                    }
+                }
+                k = k1 + 1;
+            }
+        }
+    }
+
+    /// Vertex shared by two edges (NONE if they have none).
+    fn shared_vertex(&self, e1: u32, e2: u32) -> u32 {
+        let (a, b) = (&self.mesh.edges[e1 as usize], &self.mesh.edges[e2 as usize]);
+        a.v.iter().copied().find(|v| b.v.contains(v)).unwrap_or(NONE)
     }
 
     /// Spacing bounds for crossing (wire wi, index k) from its neighbours on the edge.
@@ -474,13 +706,7 @@ impl LayerGeom {
         let relief = (w.width - wx).max(0.0) / 2.0;
         let mut lo = if w.xlo[k] > 0.0 { (w.xlo[k] - relief).max(0.0) } else { w.xlo[k] };
         let mut hi = if w.xhi[k] < ed.len { (w.xhi[k] + relief).min(ed.len) } else { w.xhi[k] };
-        let ev = (self.vpos(ed.v[1]) - self.vpos(ed.v[0])).norm();
-        let sin_of = |o: &GWire, kk: usize| -> f64 {
-            let a = self.wpt(o, kk);
-            let b = self.wpt(o, kk + 2);
-            let d = (b - a).norm();
-            d.cross(ev).abs().max(0.25)
-        };
+        let sin_of = |o: &GWire, kk: usize| self.cross_sin(o, kk);
         let s_self = sin_of(w, k);
         // differential pair follower: lock to the leader crossing right next to it
         if let Some((pn, dist)) = w.follow {
@@ -547,14 +773,15 @@ impl LayerGeom {
                     self.chord_viol(wi, k, prev, x, rules).max(self.chord_viol(wi, k + 1, x, next, rules))
                 };
                 let old = w.xt[k];
-                // feasible sub-interval w.r.t. corner obstacles
-                let (lo, hi, ok) = if lo <= hi {
+                // feasible sub-interval w.r.t. corner obstacles: Ok(interval) or
+                // Err(least violating point)
+                let feasible = |lo: f64, hi: f64| -> Result<(f64, f64), f64> {
                     const NS: usize = 12;
                     let ts: Vec<f64> = (0..=NS).map(|i| lo + (hi - lo) * i as f64 / NS as f64).collect();
                     let vs: Vec<f64> = ts.iter().map(|&t| viol(t)).collect();
                     let feas: Vec<bool> = vs.iter().map(|&v| v <= 1e-6).collect();
                     if feas.iter().all(|&x| x) {
-                        (lo, hi, true)
+                        Ok((lo, hi))
                     } else if let Some(seed) = (0..=NS).filter(|&i| feas[i]).min_by(|&i, &j| f(ts[i]).partial_cmp(&f(ts[j])).unwrap()) {
                         // grow the feasible run around the best feasible sample
                         let (mut i0, mut i1) = (seed, seed);
@@ -578,11 +805,20 @@ impl LayerGeom {
                         };
                         let a = if i0 > 0 { refine(ts[i0], ts[i0 - 1]) } else { ts[0] };
                         let b = if i1 < NS { refine(ts[i1], ts[i1 + 1]) } else { ts[NS] };
-                        (a, b, true)
+                        Ok((a, b))
                     } else {
                         // nothing feasible: least violation
                         let i = (0..=NS).min_by(|&i, &j| vs[i].partial_cmp(&vs[j]).unwrap()).unwrap();
-                        (ts[i], ts[i], false)
+                        Err(ts[i])
+                    }
+                };
+                let (lo, hi, ok) = if lo <= hi {
+                    // centring window first (clipped to the bounds); the rules always win:
+                    // without a clean spot inside the window the whole interval is used
+                    let centred = w.win[k].and_then(|(a, b)| feasible(a.clamp(lo, hi), b.clamp(lo, hi)).ok());
+                    match centred.map(Ok).unwrap_or_else(|| feasible(lo, hi)) {
+                        Ok((a, b)) => (a, b, true),
+                        Err(t) => (t, t, false),
                     }
                 } else {
                     (lo, hi, false)
@@ -632,6 +868,64 @@ impl LayerGeom {
             }
         }
         (maxd, infeasible)
+    }
+
+    /// GRIDLESS_DEBUG_NET=<net>: dump the wires of that net on this layer.
+    fn debug_net(&self, r: &Router, rules: &Rules) {
+        if let Ok(dn) = std::env::var("GRIDLESS_DEBUG_NET") {
+            let (lg, layer) = (self, self.layer);
+            for (wi, w) in lg.wires.iter().enumerate() {
+                if r.board.nets[w.net].name != dn {
+                    continue;
+                }
+                eprintln!("== wire {wi} net {dn} layer {layer} start {:?} end {:?}", w.start, w.end);
+                for pr in lg.prims(wi) {
+                    match pr {
+                        Prim::Seg(a, b) => eprintln!("  seg ({:.3},{:.3})-({:.3},{:.3})", a.x, a.y, b.x, b.y),
+                        Prim::Arc(a) => eprintln!("  arc c({:.3},{:.3}) r {:.3} a0 {:.1} sw {:.1}  ({:.3},{:.3})->({:.3},{:.3})", a.c.x, a.c.y, a.r, a.a0.to_degrees(), a.sweep.to_degrees(), a.start().x, a.start().y, a.end().x, a.end().y),
+                    }
+                }
+                for k in 0..w.xe.len() {
+                    let ed = &lg.mesh.edges[w.xe[k] as usize];
+                    let (lo, hi) = lg.bounds(wi as u32, k, rules);
+                    let lab = |v: u32| {
+                        let mv = &lg.mesh.verts[v as usize];
+                        format!("{:?}r{:.2}{}", mv.pos, mv.r, mv.obs.map(|o| format!(" obs{}:{:?}", o, lg.mesh.obs[o as usize].net.map(|n| r.board.nets[n].name.clone()))).unwrap_or_default())
+                    };
+                    let prev = lg.wpt(w, k);
+                    let x = lg.wpt(w, k + 1);
+                    let next = lg.wpt(w, k + 2);
+                    eprintln!(
+                        "  x{k}: t={:.4} [{:.3},{:.3}] win {:?} len {:.3} v0 {} | v1 {} | chord corner {} rho {:.4} crho {:.4} viol {:.3}/{:.3}",
+                        w.xt[k], lo, hi, w.win[k], ed.len, lab(ed.v[0]), lab(ed.v[1]), w.corner[k], w.rho[k], w.crho[k],
+                        lg.chord_viol(wi, k, prev, x, rules), lg.chord_viol(wi, k + 1, x, next, rules)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Gap equalisation on a relaxed layer: pull the crossings into their centring windows
+    /// and let the rest of every wire settle around them.
+    fn equalise_gaps(&mut self, rules: &Rules, radar: &crate::config::Centering) {
+        self.walls = edge_walls(&self.mesh);
+        // the slots depend on the crossing angles, which move with the tracks: refresh
+        // them a few times, then freeze them so that the relaxation can settle
+        const REFRESH: usize = 20;
+        const MAX: usize = 50;
+        let mut it = 0;
+        loop {
+            self.update_rho(rules);
+            if it % 5 == 0 && it <= REFRESH {
+                self.update_windows(rules, radar);
+            }
+            let (d, _) = self.sweep(rules);
+            it += 1;
+            if (d < 2e-5 && it > REFRESH) || it >= MAX {
+                log::info!("layer {}: gaps equalised in {} sweeps (last change {:.2e})", self.layer, it, d);
+                break;
+            }
+        }
     }
 
     /// Build primitives (segments + arcs) of wire wi.
@@ -969,6 +1263,29 @@ fn trace(m: &Mesh, sv: u32, ev: u32, pts: &[P]) -> Option<(Vec<u32>, Vec<f64>, V
     Some((xe, xt, tris))
 }
 
+/// For every edge that runs through free space between the copper of two different
+/// obstacles (pads, vias, fixed copper; not keepouts or the board edge): how far the
+/// copper of each end reaches along the edge.
+fn edge_walls(mesh: &Mesh) -> Vec<Option<[f64; 2]>> {
+    mesh.edges
+        .iter()
+        .map(|ed| {
+            if ed.owner.is_some() {
+                return None;
+            }
+            let (va, vb) = (&mesh.verts[ed.v[0] as usize], &mesh.verts[ed.v[1] as usize]);
+            let (oa, ob) = (va.obs?, vb.obs?);
+            let copper = |o: u32| mesh.obs[o as usize].kind != ObsKind::Keepout;
+            if oa == ob || !copper(oa) || !copper(ob) {
+                return None;
+            }
+            let ea = exit_dist(&mesh.obs[oa as usize].shape, va.pos, vb.pos, 0.0);
+            let eb = exit_dist(&mesh.obs[ob as usize].shape, vb.pos, va.pos, 0.0);
+            (ea + eb < ed.len - 1e-6).then_some([ea, eb])
+        })
+        .collect()
+}
+
 /// For every triangle: obstacles / outline segments whose clearance zone may reach it.
 fn near_lists(mesh: &Mesh, outline: &[Vec<P>], rules: &Rules) -> (Vec<Vec<u32>>, Vec<Vec<(P, P)>>) {
     let max_clr = rules.nets.iter().map(|n| n.clearance).fold(rules.default_clearance, f64::max);
@@ -1074,6 +1391,7 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
             outline: pb.outline.clone(),
             tri_obs,
             tri_out,
+            walls: Vec::new(),
             rules: rules.clone(),
         };
         let map_v = |v: u32| -> Option<u32> {
@@ -1132,8 +1450,10 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
                 tris,
                 corner: vec![NONE; n + 1],
                 rho: vec![0.0; n + 1],
+                crho: vec![0.0; n + 1],
                 neck: [neck_width(r, &lg.mesh, sv, tw.width, rules), neck_width(r, &lg.mesh, ev, tw.width, rules)],
                 cw: Vec::new(),
+                win: vec![None; n],
                 follow: match tw.couple {
                     Some((pi, false)) => Some((rules.diff_pairs[pi].p, rules.diff_pairs[pi].width + rules.diff_pairs[pi].gap)),
                     _ => None,
@@ -1260,46 +1580,30 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
                 }
             }
         }
+        // ---- centring: spread the tracks evenly between neighbouring pads
+        if let Some(radar) = rules.centering {
+            lg.equalise_gaps(rules, &radar);
+        }
         lg.update_rho(rules);
         lg.auto_neck(rules, r.board.rules.min_track_width);
         lg.update_rho(rules);
-        if let Ok(dn) = std::env::var("GRIDLESS_DEBUG_NET") {
-            for (wi, w) in lg.wires.iter().enumerate() {
-                if r.board.nets[w.net].name != dn {
-                    continue;
-                }
-                eprintln!("== wire {wi} net {dn} layer {layer} start {:?} end {:?}", w.start, w.end);
-                for pr in lg.prims(wi) {
-                    match pr {
-                        Prim::Seg(a, b) => eprintln!("  seg ({:.3},{:.3})-({:.3},{:.3})", a.x, a.y, b.x, b.y),
-                        Prim::Arc(a) => eprintln!("  arc c({:.3},{:.3}) r {:.3} a0 {:.1} sw {:.1}  ({:.3},{:.3})->({:.3},{:.3})", a.c.x, a.c.y, a.r, a.a0.to_degrees(), a.sweep.to_degrees(), a.start().x, a.start().y, a.end().x, a.end().y),
-                    }
-                }
-                for k in 0..w.xe.len() {
-                    let ed = &lg.mesh.edges[w.xe[k] as usize];
-                    let (lo, hi) = lg.bounds(wi as u32, k, rules);
-                    let lab = |v: u32| {
-                        let mv = &lg.mesh.verts[v as usize];
-                        format!("{:?}r{:.2}{}", mv.pos, mv.r, mv.obs.map(|o| format!(" obs{}:{:?}", o, lg.mesh.obs[o as usize].net.map(|n| r.board.nets[n].name.clone()))).unwrap_or_default())
-                    };
-                    let prev = lg.wpt(w, k);
-                    let x = lg.wpt(w, k + 1);
-                    let next = lg.wpt(w, k + 2);
-                    eprintln!(
-                        "  x{k}: t={:.3} [{:.3},{:.3}] len {:.3} v0 {} | v1 {} | chord corner {} rho {:.3} viol {:.3}/{:.3}",
-                        w.xt[k], lo, hi, ed.len, lab(ed.v[0]), lab(ed.v[1]), w.corner[k], w.rho[k],
-                        lg.chord_viol(wi, k, prev, x, rules), lg.chord_viol(wi, k + 1, x, next, rules)
-                    );
-                }
-            }
-        }
+        lg.debug_net(r, rules);
         if infeasible > 0 {
             warnings.push(format!("layer {layer}: {infeasible} crossings without enough room"));
         }
         layers.push(lg);
     }
+    let tracks = build_tracks(r, pb, rules, &layers);
+    let vias = used.iter().map(|&(_, pos, n)| (pos, n)).collect();
+    let _ = p(0.0, 0.0);
+    Geometry { layers, tracks, vias, warnings }
+}
+
+/// Tracks of all realised wires (pairs split into their two conductors) plus the escape
+/// stubs of the pads they connect.
+fn build_tracks(r: &Router, pb: &Problem, rules: &Rules, layers: &[LayerGeom]) -> Vec<Track> {
     let mut tracks = Vec::new();
-    for lg in &layers {
+    for lg in layers {
         for wi in 0..lg.wires.len() {
             let w = &lg.wires[wi];
             let prims = lg.prims(wi);
@@ -1342,7 +1646,7 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
     }
     // escape stubs of the pads that got connected
     let mut stub_done = vec![false; r.board.pads.len()];
-    for lg in &layers {
+    for lg in layers {
         for w in &lg.wires {
             for v in [w.sv, w.ev] {
                 if let Some(pd) = lg.mesh.verts[v as usize].pad {
@@ -1358,9 +1662,25 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
             }
         }
     }
-    let vias = used.iter().map(|&(_, pos, n)| (pos, n)).collect();
-    let _ = p(0.0, 0.0);
-    Geometry { layers, tracks, vias, warnings }
+    tracks
+}
+
+/// Gap equalisation as post-processing of a realised geometry: spread the tracks evenly
+/// between neighbouring pads (radar-weighted) and rebuild them. Topology, vias and the
+/// rule clearances stay as they are.
+pub fn equalise(r: &Router, pb: &Problem, rules: &Rules, geo: &mut Geometry) {
+    let radar = match rules.centering {
+        Some(c) => c,
+        None => return,
+    };
+    for lg in geo.layers.iter_mut() {
+        lg.equalise_gaps(rules, &radar);
+        lg.update_rho(rules);
+        lg.auto_neck(rules, r.board.rules.min_track_width);
+        lg.update_rho(rules);
+        lg.debug_net(r, rules);
+    }
+    geo.tracks = build_tracks(r, pb, rules, &geo.layers);
 }
 
 #[cfg(test)]

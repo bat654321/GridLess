@@ -22,6 +22,9 @@
 //! [[length_groups]]
 //! match = ["A_DATA", "B_DATA", "C_DATA"]
 //! tolerance = 0.5
+//! [centering]                  # equal gaps between pads (on by default)
+//! full = 1.3                   # pad distance (mm) with exactly equal gaps
+//! range = 3.25                 # pad distance (mm) from which pads no longer pull
 //! ```
 
 use crate::board::{Board, LayerId, NetId};
@@ -98,9 +101,26 @@ pub struct LengthGroupCfg {
     pub tolerance: Option<f64>,
 }
 
+/// Even spreading of tracks between neighbouring pads ("radar").
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CenteringCfg {
+    /// default true
+    pub enabled: Option<bool>,
+    /// distance between pads (copper to copper, mm) up to which the tracks between them
+    /// get exactly equal gaps (default 2 channels of the default net class, see below)
+    pub full: Option<f64>,
+    /// distance between pads from which they no longer pull the tracks ("radar range";
+    /// default 5 channels). Channel = track width + 2 x clearance.
+    pub range: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// spread tracks evenly between neighbouring pads
+    #[serde(default)]
+    pub centering: CenteringCfg,
     #[serde(default)]
     pub layers: BTreeMap<String, LayerCfg>,
     #[serde(default)]
@@ -166,6 +186,28 @@ pub struct LengthGroup {
     pub tolerance: f64,
 }
 
+/// Radar of the gap equalisation: how strongly the gap between two pads pulls the tracks
+/// running through it to equal spacing, as a function of the distance between the pads.
+#[derive(Clone, Copy, Debug)]
+pub struct Centering {
+    pub full: f64,
+    pub range: f64,
+}
+
+impl Centering {
+    /// 1 = exactly equal gaps, 0 = no pull (free rubber band); smooth in between.
+    pub fn weight(&self, dist: f64) -> f64 {
+        if dist <= self.full {
+            1.0
+        } else if dist >= self.range {
+            0.0
+        } else {
+            let x = (dist - self.full) / (self.range - self.full);
+            1.0 - x * x * (3.0 - 2.0 * x)
+        }
+    }
+}
+
 /// Fully resolved rules for one routing run.
 #[derive(Clone, Debug)]
 pub struct Rules {
@@ -176,6 +218,7 @@ pub struct Rules {
     pub via_cost: f64,
     pub diff_pairs: Vec<DiffPair>,
     pub length_groups: Vec<LengthGroup>,
+    pub centering: Option<Centering>,
     pub keep_existing: bool,
     pub trust_pours: bool,
     pub force_fanout: Vec<String>,
@@ -320,6 +363,15 @@ impl Rules {
             })
             .filter(|g| !g.nets.is_empty())
             .collect();
+        let default_clearance = dc.clearance.max(b.rules.min_clearance);
+        let centering = if cfg.centering.enabled.unwrap_or(true) {
+            let channel = dc.track_width.max(b.rules.min_track_width) + 2.0 * default_clearance;
+            let full = cfg.centering.full.unwrap_or(2.0 * channel);
+            let range = cfg.centering.range.unwrap_or(5.0 * channel).max(full + 1e-3);
+            Some(Centering { full, range })
+        } else {
+            None
+        };
         Rules {
             layers,
             nets,
@@ -328,6 +380,7 @@ impl Rules {
             via_cost: cfg.via.cost.unwrap_or(6.0),
             diff_pairs,
             length_groups,
+            centering,
             keep_existing: cfg.keep_existing.unwrap_or(false),
             trust_pours: cfg.trust_pours.unwrap_or(true),
             force_fanout: cfg.force_fanout.clone(),
@@ -336,7 +389,7 @@ impl Rules {
             edge_clearance: b.rules.edge_clearance.max(0.0),
             hole_to_hole: b.rules.hole_to_hole,
             hole_clearance: b.rules.hole_clearance,
-            default_clearance: dc.clearance.max(b.rules.min_clearance),
+            default_clearance,
         }
     }
 
