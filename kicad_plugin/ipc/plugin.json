@@ -1,0 +1,21 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "org.gridless.router",
+  "name": "GridLess Router",
+  "description": "Gridless topological (rubber-band) autorouter: any-angle tracks with arcs, differential pairs, length matching",
+  "runtime": {
+    "type": "python"
+  },
+  "actions": [
+    {
+      "identifier": "gridless.route",
+      "name": "GridLess: autoroute",
+      "description": "Route the open board with GridLess and insert the result (one undo step)",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "gridless_action.py",
+      "icons-light": ["icon.png"],
+      "icons-dark": ["icon-dark.png"]
+    }
+  ]
+}

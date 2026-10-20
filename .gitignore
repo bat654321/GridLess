@@ -1,0 +1,6 @@
+/target
+/testdata/
+/out/
+*.kicad_prl
+*-backups/
+fp-info-cache

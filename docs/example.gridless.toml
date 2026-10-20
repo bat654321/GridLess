@@ -1,0 +1,51 @@
+# GridLess router settings. Put next to the board as <board>.gridless.toml
+# (picked up automatically) or pass with --config. Everything is optional:
+# defaults come from the KiCad project (net classes, design rules).
+
+# ---- layers: role (signal | plane | off), preferred direction, cost
+[layers."F.Cu"]
+direction = "horizontal"   # horizontal | vertical | any
+direction_weight = 1.0     # extra cost per unit of off-direction travel
+[layers."In1.Cu"]
+role = "plane"             # inner layers mostly covered by zones are planes by default
+[layers."In2.Cu"]
+direction = "vertical"
+[layers."B.Cu"]
+direction = "vertical"
+cost = 1.2                 # >1 discourages the layer
+
+# ---- vias (default: Default net class)
+[via]
+diameter = 0.5
+drill = 0.3
+cost = 6.0                 # how many mm of track one via is worth
+
+# ---- per-net rules (glob patterns); later entries override earlier ones
+[[nets]]
+match = ["+5", "3V3", "3V7", "VBUS*"]
+width = 0.8                # auto neck-down where there is no room
+[[nets]]
+match = ["TEST*"]
+skip = true                # do not route
+[[nets]]
+match = ["CLK*"]
+priority = 5               # route earlier
+
+# ---- differential pairs (also detected automatically from _P/_N, +/-, P/N)
+[[diff_pairs]]
+p = "USB_P"
+n = "USB_N"
+width = 0.2
+gap = 0.15
+max_skew = 0.1
+
+# ---- length matching groups
+[[length_groups]]
+match = ["DDR_DQ*"]
+tolerance = 0.5            # mm
+# target = 25.0            # default: the longest member
+
+# ---- misc
+# keep_existing = false    # true: keep routed tracks, add only what is missing
+# trust_pours = true       # SMD pads of plane nets inside a same-net pour need no via
+# iterations = 40          # negotiation iterations of the topological router
