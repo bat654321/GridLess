@@ -354,7 +354,8 @@ pub fn tune(b: &Board, pb: &Problem, rules: &Rules, g: &mut Geometry) -> Vec<Tun
                     names.push(b.footprints[k.0].reference.clone());
                     names.push(b.footprints[k.1].reference.clone());
                 } else {
-                    let mut cur = *deg.iter().find(|(_, &d)| d == 1).map(|(k, _)| k).unwrap_or(&segs[0].0 .0);
+                    // start at the lower-numbered end of the chain (stable label)
+                    let mut cur = deg.iter().filter(|(_, &d)| d == 1).map(|(&k, _)| k).min().unwrap_or(segs[0].0 .0);
                     let mut used = vec![false; segs.len()];
                     names.push(b.footprints[cur].reference.clone());
                     while let Some(i) = (0..segs.len()).find(|&i| !used[i] && (segs[i].0 .0 == cur || segs[i].0 .1 == cur)) {

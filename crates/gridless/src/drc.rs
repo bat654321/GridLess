@@ -100,10 +100,14 @@ pub fn check(b: &Board, pb: &Problem, rules: &Rules, g: &Geometry) -> Report {
             }
         }
     }
+    // visit the cells in a fixed order: the report drives the re-routing, so it must not
+    // depend on the (per-process random) hash order
+    let mut cells: Vec<(i32, i32)> = grid.keys().copied().collect();
+    cells.sort_unstable();
     let mut seen = std::collections::HashSet::new();
     let mut violations = Vec::new();
     let tol = 5e-4;
-    for cellv in grid.values() {
+    for cellv in cells.iter().map(|k| &grid[k]) {
         for x in 0..cellv.len() {
             for y in x + 1..cellv.len() {
                 let (i, j) = (cellv[x].min(cellv[y]), cellv[x].max(cellv[y]));
@@ -148,7 +152,8 @@ pub fn check(b: &Board, pb: &Problem, rules: &Rules, g: &Geometry) -> Report {
         let _ = dist_to_outline;
     }
     // collapse duplicates (one per track primitive pair)
-    violations.sort_by(|a, b| a.gap.partial_cmp(&b.gap).unwrap());
+    // total order, so that the same duplicate survives every time
+    violations.sort_by(|a, b| a.gap.total_cmp(&b.gap).then(a.at.x.total_cmp(&b.at.x)).then(a.at.y.total_cmp(&b.at.y)).then_with(|| a.a.cmp(&b.a)).then_with(|| a.b.cmp(&b.b)));
     let mut dedup: Vec<Violation> = Vec::new();
     for v in violations {
         if !dedup.iter().any(|o| o.a == v.a && o.b == v.b && o.at.dist(v.at) < 0.5) {
@@ -165,7 +170,7 @@ pub fn check(b: &Board, pb: &Problem, rules: &Rules, g: &Geometry) -> Report {
         }
         x
     }
-    for cellv in grid.values() {
+    for cellv in cells.iter().map(|k| &grid[k]) {
         for x in 0..cellv.len() {
             for y in x + 1..cellv.len() {
                 let (i, j) = (cellv[x], cellv[y]);

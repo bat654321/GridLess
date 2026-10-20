@@ -219,3 +219,38 @@ fn equal_gaps_respect_clearance_rules() {
     let outer = (gap - 3.0 * w - 2.0 * (0.25 + m)) / 2.0;
     assert!((g[0] - outer).abs() < 0.003, "outer gaps should share the rest ({outer:.4}): {g:?}");
 }
+
+#[test]
+fn drc_report_is_deterministic() {
+    // a grid of crossing tracks of two nets: many violations with equal gaps; every DRC
+    // run hashes with a new random seed, the report must still come out the same
+    use gridless::geometry::{Geometry, Prim, Track};
+    let fps = vec![
+        footprint("U1", 2.0, 2.0, &[pad("1", "smd", "rect", 0.0, 0.0, 0.6, 0.6, "\"F.Cu\"", "A")]),
+        footprint("U2", 28.0, 18.0, &[pad("1", "smd", "rect", 0.0, 0.0, 0.6, 0.6, "\"F.Cu\"", "B")]),
+    ];
+    let src = board(2, &fps);
+    let dir = std::env::temp_dir().join(format!("gridless_det_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.kicad_pcb");
+    std::fs::write(&path, src).unwrap();
+    let l = gridless::kicad::load(&path).unwrap();
+    let rules = Rules::resolve(&l.board, &Config::default());
+    let pb = Problem::build(&l.board, &rules);
+    let (a, b) = (l.board.net_id("A").unwrap(), l.board.net_id("B").unwrap());
+    let p = gridless::geom::p;
+    let mut tracks = Vec::new();
+    for i in 0..8 {
+        let x = 5.0 + 2.5 * i as f64;
+        let y = 3.0 + 2.0 * i as f64;
+        tracks.push(Track { layer: 0, net: a, width: 0.25, conn: 0, prims: vec![Prim::Seg(p(x, 1.0), p(x, 19.0))], pw: vec![0.25] });
+        tracks.push(Track { layer: 0, net: b, width: 0.25, conn: 1, prims: vec![Prim::Seg(p(1.0, y), p(29.0, y))], pw: vec![0.25] });
+    }
+    let geo = Geometry { layers: Vec::new(), tracks, vias: Vec::new(), warnings: Vec::new() };
+    let key = |r: &gridless::drc::Report| r.violations.iter().map(|v| format!("{} {:.6} {:.6} {} {}", v.kind, v.at.x, v.at.y, v.a, v.b)).collect::<Vec<_>>();
+    let first = key(&gridless::drc::check(&l.board, &pb, &rules, &geo));
+    assert!(first.len() >= 64, "expected a violation per crossing, got {}", first.len());
+    for _ in 0..5 {
+        assert_eq!(key(&gridless::drc::check(&l.board, &pb, &rules, &geo)), first);
+    }
+}
