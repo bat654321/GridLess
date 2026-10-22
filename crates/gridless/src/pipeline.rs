@@ -118,12 +118,10 @@ pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress
         r.improve(1);
     }
     let (best_sc, mut geo, mut drc, stats) = best.unwrap();
-    // gap equalisation on the best geometry; it must not cost a rule: on a layer where it
-    // adds violations the tight tracks are kept
-    if rules.centering.is_some() {
-        let tight_tracks = geo.tracks.clone();
-        crate::geometry::equalise(&r, pb, rules, &mut geo);
-        let mut crep = drc::check(board, pb, rules, &geo);
+    // finishing of the best geometry: gap equalisation, then smoothing (straight pad
+    // entries, rounded kinks). Neither may cost a rule: each stage is checked on its own,
+    // and on a layer where it adds violations that layer keeps its tracks from before
+    {
         let per_layer = |rep: &Report, tracks: &[crate::geometry::Track]| {
             let mut n = vec![0usize; board.layers.len()];
             for v in &rep.violations {
@@ -133,31 +131,41 @@ pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress
             }
             n
         };
-        let (before, after) = (per_layer(&drc, &tight_tracks), per_layer(&crep, &geo.tracks));
-        let worse: Vec<usize> = (0..board.layers.len()).filter(|&l| after[l] > before[l]).collect();
-        if !worse.is_empty() {
-            let mut merged: Vec<crate::geometry::Track> = geo.tracks.drain(..).filter(|t| !worse.contains(&t.layer)).collect();
-            merged.extend(tight_tracks.iter().filter(|t| worse.contains(&t.layer)).cloned());
-            geo.tracks = merged;
-            crep = drc::check(board, pb, rules, &geo);
-            let names: Vec<&str> = worse.iter().map(|&l| board.layers[l].name.as_str()).collect();
-            progress(&format!("gap equalisation kept off {:?}: it added violations there", names));
+        // keep the stage on the layers it did not make worse; returns the new report
+        let guard = |stage: &str, geo: &mut Geometry, before: Vec<crate::geometry::Track>, rep_before: &Report, progress: &mut dyn FnMut(&str)| -> Report {
+            let mut rep = drc::check(board, pb, rules, geo);
+            let (b, a) = (per_layer(rep_before, &before), per_layer(&rep, &geo.tracks));
+            let worse: Vec<usize> = (0..board.layers.len()).filter(|&l| a[l] > b[l]).collect();
+            if !worse.is_empty() {
+                let mut merged: Vec<crate::geometry::Track> = geo.tracks.drain(..).filter(|t| !worse.contains(&t.layer)).collect();
+                merged.extend(before.into_iter().filter(|t| worse.contains(&t.layer)));
+                geo.tracks = merged;
+                rep = drc::check(board, pb, rules, geo);
+                let names: Vec<&str> = worse.iter().map(|&l| board.layers[l].name.as_str()).collect();
+                progress(&format!("{stage} kept off {names:?}: it added violations there"));
+            }
+            rep
+        };
+        let tight_tracks = geo.tracks.clone();
+        let mut what: Vec<String> = Vec::new();
+        let mut crep = drc.clone();
+        if let Some(radar) = rules.centering {
+            let before = geo.tracks.clone();
+            crate::geometry::equalise(&r, pb, rules, &mut geo);
+            crep = guard("gap equalisation", &mut geo, before, &crep, progress);
+            what.push(format!("gaps equalised (radar: equal up to {:.2} mm between pads, none from {:.2} mm)", radar.full, radar.range));
         }
+        let before = geo.tracks.clone();
+        let sm = crate::smooth::smooth(board, pb, rules, &mut geo);
+        crep = guard("smoothing", &mut geo, before, &crep, progress);
+        what.push(format!("{} pad entries straightened ({} escape stubs absorbed), {} corners rounded, {:.1} mm saved", sm.entries, sm.stubs_dropped, sm.corners, sm.saved));
         let unrouted = r.st.conns.iter().filter(|c| !c.routed).count();
         let sc = score(&crep, &geo, unrouted);
         if (sc.0, sc.1) <= (best_sc.0, best_sc.1) {
-            let radar = rules.centering.unwrap();
-            progress(&format!(
-                "gap equalisation (radar: equal gaps up to {:.2} mm between pads, none from {:.2} mm): {} violations, length {:.1} -> {:.1} mm",
-                radar.full,
-                radar.range,
-                crep.violations.len(),
-                best_sc.3 as f64 / 10.0,
-                sc.3 as f64 / 10.0
-            ));
+            progress(&format!("finishing: {}; {} violations, length {:.1} -> {:.1} mm", what.join(", "), crep.violations.len(), best_sc.3 as f64 / 10.0, sc.3 as f64 / 10.0));
             drc = crep;
         } else {
-            progress(&format!("gap equalisation dropped: {} violations instead of {}", crep.violations.len(), drc.violations.len()));
+            progress(&format!("finishing dropped: {} violations instead of {}", crep.violations.len(), drc.violations.len()));
             geo.tracks = tight_tracks;
         }
     }

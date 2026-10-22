@@ -34,6 +34,7 @@ struct Item {
     track: Option<(usize, usize)>,
 }
 
+#[derive(Clone)]
 pub struct Report {
     pub violations: Vec<Violation>,
     pub unconnected: Vec<String>,

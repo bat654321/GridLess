@@ -12,5 +12,6 @@ pub mod pipeline;
 pub mod problem;
 pub mod render;
 pub mod sexpr;
+pub mod smooth;
 pub mod topo;
 pub mod tuning;

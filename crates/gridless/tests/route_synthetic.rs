@@ -254,3 +254,47 @@ fn drc_report_is_deterministic() {
         assert_eq!(key(&gridless::drc::check(&l.board, &pb, &rules, &geo)), first);
     }
 }
+
+#[test]
+fn smoothing_straightens_entries_and_rounds_kinks() {
+    use gridless::geometry::{Geometry, Prim, Track};
+    // net A: pad at (10,10); its track leaves round the pad's corner (a hook) and then
+    // bends sharply in open space. A far pad of net B must not be touched.
+    let fps = vec![
+        footprint("U1", 10.0, 10.0, &[pad("1", "smd", "rect", 0.0, 0.0, 1.0, 1.0, "\"F.Cu\"", "A")]),
+        footprint("U2", 25.0, 10.0, &[pad("1", "smd", "rect", 0.0, 0.0, 1.0, 1.0, "\"F.Cu\"", "B")]),
+    ];
+    let src = board(2, &fps);
+    let dir = std::env::temp_dir().join(format!("gridless_smooth_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.kicad_pcb");
+    std::fs::write(&path, src).unwrap();
+    let l = gridless::kicad::load(&path).unwrap();
+    let rules = Rules::resolve(&l.board, &Config::default());
+    let pb = Problem::build(&l.board, &rules);
+    let a = l.board.net_id("A").unwrap();
+    let p = gridless::geom::p;
+    let pts = [p(10.0, 10.0), p(9.4, 9.4), p(12.0, 6.0), p(15.0, 6.0), p(17.0, 3.0)];
+    let prims: Vec<Prim> = pts.windows(2).map(|w| Prim::Seg(w[0], w[1])).collect();
+    let pw = vec![0.25; prims.len()];
+    let len0: f64 = prims.iter().map(|q| q.len()).sum();
+    let mut geo = Geometry { layers: Vec::new(), tracks: vec![Track { layer: 0, net: a, width: 0.25, conn: 0, prims, pw }], vias: Vec::new(), warnings: Vec::new() };
+    let st = gridless::smooth::smooth(&l.board, &pb, &rules, &mut geo);
+    let t = &geo.tracks[0];
+    assert!(st.entries >= 1, "{st:?}");
+    assert!(st.corners >= 1, "{st:?}");
+    // the hook round the pad corner is gone: the track leaves the pad straight
+    let first = t.prims[0];
+    assert!(first.start().dist(p(10.0, 10.0)) < 1e-9);
+    assert!(gridless::geom::point_seg_dist(p(9.4, 9.4), first.start(), first.end()) > 0.3, "{:?}", t.prims);
+    assert!(t.prims.iter().any(|q| matches!(q, Prim::Arc(_))), "no rounded corner: {:?}", t.prims);
+    let len1: f64 = t.prims.iter().map(|q| q.len()).sum();
+    assert!(len1 < len0 - 0.5, "{len0} -> {len1}");
+    // still one continuous track from the pad to the far end
+    for w in t.prims.windows(2) {
+        assert!(w[0].end().dist(w[1].start()) < 1e-6);
+    }
+    assert!(t.prims.last().unwrap().end().dist(p(17.0, 3.0)) < 1e-9);
+    let rep = gridless::drc::check(&l.board, &pb, &rules, &geo);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+}
