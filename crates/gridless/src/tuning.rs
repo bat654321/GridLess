@@ -86,7 +86,8 @@ impl Index {
                 if it.layers & (1 << layer) == 0 || it.net == Some(net) {
                     continue;
                 }
-                let need = rules.clr(Some(net), it.net) + w / 2.0 + 0.002;
+                // the polyline cuts inside the arcs by up to 1 um: keep the geometry margin
+                let need = rules.clr(Some(net), it.net) + w / 2.0 + crate::geometry::GEOM_MARGIN;
                 if it.shape.seg_dist(s[0], s[1]) < need {
                     return false;
                 }
@@ -95,7 +96,7 @@ impl Index {
                 for poly in outline {
                     let n = poly.len();
                     for k in 0..n {
-                        if crate::geom::seg_seg_dist(s[0], s[1], poly[k], poly[(k + 1) % n]) < rules.edge_clearance + w / 2.0 + 0.002 {
+                        if crate::geom::seg_seg_dist(s[0], s[1], poly[k], poly[(k + 1) % n]) < rules.edge_clearance + w / 2.0 + crate::geometry::GEOM_MARGIN {
                             return false;
                         }
                     }
@@ -106,17 +107,17 @@ impl Index {
     }
 }
 
-/// Rounded single-sided trombone along a -> b: `n` bumps of amplitude `amp`, turn radius
-/// `r`, on side `side` (+1 left / -1 right of travel direction). Returns the primitives.
-pub fn trombone(a: P, b: P, n: usize, amp: f64, r: f64, side: f64) -> Vec<Prim> {
+/// Rounded trombone along a -> b: `n` bumps of amplitude `amp`, turn radius `r`, on side
+/// `side` (+1 left / -1 right of travel direction), or on alternating sides (`alt`, a
+/// meander centred on the line). Returns the primitives.
+pub fn trombone(a: P, b: P, n: usize, amp: f64, r: f64, side: f64, alt: bool) -> Vec<Prim> {
     let len = a.dist(b);
     let d = (b - a) / len;
-    let nn = d.perp() * side;
+    let mut nn = d.perp() * side;
     let bump_w = 4.0 * r;
     let total = n as f64 * bump_w + (n as f64 - 1.0).max(0.0) * 2.0 * r;
     let mut x = (len - total) / 2.0;
-    let at = |s: f64, h: f64| a + d * s + nn * h;
-    let mut out = vec![Prim::Seg(a, at(x, 0.0))];
+    let mut out = vec![Prim::Seg(a, a + d * x)];
     // arc helper: centre, start point, end point, turning towards `ccw`
     let mk = |c: P, s: P, e: P| {
         let a0 = (s - c).angle();
@@ -124,6 +125,10 @@ pub fn trombone(a: P, b: P, n: usize, amp: f64, r: f64, side: f64) -> Vec<Prim> 
         Prim::Arc(Arc { c, r: c.dist(s), a0, sweep: sw })
     };
     for i in 0..n {
+        if alt && i > 0 {
+            nn = -nn;
+        }
+        let at = |s: f64, h: f64| a + d * s + nn * h;
         // quarter arc up
         out.push(mk(at(x, r), at(x, 0.0), at(x + r, r)));
         out.push(Prim::Seg(at(x + r, r), at(x + r, amp - r)));
@@ -146,7 +151,7 @@ pub fn trombone(a: P, b: P, n: usize, amp: f64, r: f64, side: f64) -> Vec<Prim> 
             x += 2.0 * r;
         }
     }
-    out.push(Prim::Seg(at(x, 0.0), b));
+    out.push(Prim::Seg(a + d * x, b));
     out
 }
 
@@ -192,8 +197,11 @@ fn add_length(g: &mut Geometry, idx: &Index, rules: &Rules, outline: &[Vec<P>], 
         };
         let amp_min = 2.0 * r + 0.05;
         let mut best: Option<(f64, Vec<Prim>)> = None;
-        for side in [1.0, -1.0] {
+        for (side, alt) in [(1.0, false), (-1.0, false), (1.0, true)] {
             // skip the side facing the diff-pair partner
+            if alt && avoid.is_some() {
+                continue;
+            }
             if let Some(pn) = avoid {
                 let mid = a.mid(b) + (b - a).norm().perp() * side * (w + 0.3);
                 let near = g.tracks.iter().any(|o| o.net == pn && o.layer == t.layer && o.prims.iter().any(|q| q.polyline(0.01).windows(2).any(|s| crate::geom::point_seg_dist(mid, s[0], s[1]) < w + 0.3)));
@@ -209,8 +217,8 @@ fn add_length(g: &mut Geometry, idx: &Index, rules: &Rules, outline: &[Vec<P>], 
                     break;
                 }
                 let ok = |amp: f64| {
-                    let prs = trombone(a, b, n, amp, r, side);
-                    let pts: Vec<P> = prs.iter().flat_map(|q| q.polyline(0.005)).collect();
+                    let prs = trombone(a, b, n, amp, r, side, alt);
+                    let pts: Vec<P> = prs.iter().flat_map(|q| q.polyline(0.001)).collect();
                     idx.clear(&pts, w, net, t.layer, rules, outline)
                 };
                 let amp = if ok(amp_hi) {
@@ -231,7 +239,7 @@ fn add_length(g: &mut Geometry, idx: &Index, rules: &Rules, outline: &[Vec<P>], 
                 };
                 let gain = n as f64 * bump_gain(amp, r);
                 if best.as_ref().map_or(true, |bb| gain > bb.0 + 1e-9) {
-                    best = Some((gain, trombone(a, b, n, amp, r, side)));
+                    best = Some((gain, trombone(a, b, n, amp, r, side, alt)));
                 }
                 if gain >= rem - 0.005 {
                     break;
@@ -253,6 +261,37 @@ fn add_length(g: &mut Geometry, idx: &Index, rules: &Rules, outline: &[Vec<P>], 
         t.pw.splice(pi..pi + 1, std::iter::repeat(w).take(n));
     }
     added
+}
+
+/// Room to reserve beside the shorter members of the length groups, TopoR style: when a
+/// member will need meanders, its connections are routed as if wider by the amplitude of
+/// those meanders on each side, so that the room is still there when the lengths are
+/// matched. Estimated from the topological lengths; returns (connection, reserve).
+pub fn plan_reserve(r: &crate::topo::Router, pb: &Problem, rules: &Rules) -> Vec<(usize, f64)> {
+    let mut out = Vec::new();
+    for grp in &rules.length_groups {
+        let conns_of = |n: NetId| -> Vec<usize> { (0..pb.conns.len()).filter(|&c| pb.conns[c].net == n && pb.conns[c].couple.is_none() && r.st.conns[c].routed).collect() };
+        let lens: Vec<f64> = grp.nets.iter().map(|&n| conns_of(n).iter().map(|&c| r.conn_length(c)).sum()).collect();
+        let target = grp.target.unwrap_or_else(|| lens.iter().cloned().fold(0.0, f64::max));
+        for (i, &n) in grp.nets.iter().enumerate() {
+            let extra = target - lens[i];
+            if lens[i] <= 0.0 || extra <= grp.tolerance {
+                continue;
+            }
+            // the meanders `add_length` will draw: turn radius, pitch 6r, gain per bump
+            let (w, clr) = (rules.nets[n].width, rules.nets[n].clearance);
+            let rr = (w + clr.max(w)) / 2.0;
+            let bumps = (0.6 * lens[i] / (6.0 * rr)).floor().max(1.0);
+            let amp = (extra / bumps + (8.0 - 2.0 * std::f64::consts::PI) * rr) / 2.0;
+            // at least one bump's height, at most two channels: beyond that the route
+            // itself has to get longer
+            let res = amp.max(2.0 * rr + 0.05).min(2.0 * (w + clr));
+            for c in conns_of(n) {
+                out.push((c, res));
+            }
+        }
+    }
+    out
 }
 
 /// Match lengths of the configured groups and the skew of differential pairs.
@@ -386,13 +425,23 @@ mod tests {
     fn trombone_gain() {
         let a = p(0.0, 0.0);
         let b = p(10.0, 0.0);
-        let prs = trombone(a, b, 2, 1.0, 0.25, 1.0);
-        let len: f64 = prs.iter().map(|q| q.len()).sum();
-        let expect = 10.0 + 2.0 * bump_gain(1.0, 0.25);
-        assert!((len - expect).abs() < 1e-6, "{len} vs {expect}");
-        // continuity
-        for w in prs.windows(2) {
-            assert!(w[0].end().dist(w[1].start()) < 1e-9, "{:?} {:?}", w[0].end(), w[1].start());
+        for alt in [false, true] {
+            let prs = trombone(a, b, 3, 1.0, 0.25, 1.0, alt);
+            let len: f64 = prs.iter().map(|q| q.len()).sum();
+            let expect = 10.0 + 3.0 * bump_gain(1.0, 0.25);
+            assert!((len - expect).abs() < 1e-6, "{len} vs {expect}");
+            // continuity
+            for w in prs.windows(2) {
+                assert!(w[0].end().dist(w[1].start()) < 1e-9, "{:?} {:?}", w[0].end(), w[1].start());
+            }
+            // single-sided: all on one side; alternating: both sides, at most amp away
+            let ys: Vec<f64> = prs.iter().flat_map(|q| q.polyline(0.001)).map(|q| q.y).collect();
+            let (lo, hi) = (ys.iter().cloned().fold(0.0, f64::min), ys.iter().cloned().fold(0.0, f64::max));
+            if alt {
+                assert!(lo < -0.99 && hi > 0.99 && lo > -1.001 && hi < 1.001, "{lo} {hi}");
+            } else {
+                assert!(lo > -1e-9 && hi < 1.001, "{lo} {hi}");
+            }
         }
     }
 }

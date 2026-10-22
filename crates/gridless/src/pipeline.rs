@@ -25,6 +25,27 @@ fn score(rep: &Report, geo: &Geometry, unrouted: usize) -> (usize, usize, usize,
 
 /// Route a board. `rounds` = number of geometry/DRC feedback rounds.
 pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress: &mut dyn FnMut(&str)) -> Outcome {
+    let out = route_once(board, rules, pb, rounds, progress);
+    // length reserve "auto": only when plain routing left a length group short, route again
+    // with room reserved for the meanders and keep the better of the two
+    let short = |o: &Outcome| o.tuning.iter().filter(|t| !t.ok && !t.net.contains('/')).count();
+    if rules.length_reserve != crate::config::ReserveMode::Auto || short(&out) == 0 {
+        return out;
+    }
+    progress(&format!("{} length group member(s) not met: routing again with room reserved for meanders", short(&out)));
+    let with = Rules { length_reserve: crate::config::ReserveMode::Always, ..rules.clone() };
+    let alt = route_once(board, &with, pb, rounds, progress);
+    let key = |o: &Outcome| (o.stats.unrouted + o.drc.unconnected.len(), short(o), o.drc.violations.len(), o.geo.vias.len(), (o.length * 10.0) as i64);
+    if key(&alt) < key(&out) {
+        progress("keeping the routing with the length reserve");
+        alt
+    } else {
+        progress("keeping the routing without the length reserve");
+        out
+    }
+}
+
+fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress: &mut dyn FnMut(&str)) -> Outcome {
     let mut r = Router::new(board, pb, rules);
     progress(&format!("meshes: {:?} triangles", r.meshes.iter().map(|m| m.tris.len()).collect::<Vec<_>>()));
     r.run();
@@ -37,6 +58,32 @@ pub fn route(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progress
         "topology: {} unrouted, {} vias ({} removed by via minimisation), {} connections improved by clean-up, overflow {:.3} mm",
         r.stats.unrouted, r.stats.vias, removed, better, r.stats.overflow
     ));
+    // room for length-matching meanders, reserved while the topology can still make it
+    let plan = if rules.length_reserve == crate::config::ReserveMode::Always { crate::tuning::plan_reserve(&r, pb, rules) } else { Vec::new() };
+    if !plan.is_empty() {
+        let (st0, stats0) = (r.st.clone(), r.stats.clone());
+        let conns: Vec<usize> = plan.iter().map(|&(c, _)| c).collect();
+        for &(c, res) in &plan {
+            r.reserve[c] = res;
+        }
+        r.reroute(&conns, 10);
+        r.minimise_vias();
+        r.improve(1);
+        if r.stats.unrouted > stats0.unrouted || r.stats.vias > stats0.vias + 1 {
+            // the board has no room for it: route as before, meanders take what is left
+            for &c in &conns {
+                r.reserve[c] = 0.0;
+            }
+            r.st = st0;
+            r.stats = stats0;
+            progress("length reserve dropped: the board has no room for it");
+        } else {
+            let mut nets: Vec<&str> = plan.iter().map(|&(c, _)| board.nets[pb.conns[c].net].name.as_str()).collect();
+            nets.dedup();
+            let maxr = plan.iter().map(|x| x.1).fold(0.0, f64::max);
+            progress(&format!("length reserve for {nets:?} (up to {maxr:.2} mm each side): {} unrouted, {} vias", r.stats.unrouted, r.stats.vias));
+        }
+    }
     let mut best: Option<((usize, usize, usize, i64), Geometry, Report, RouteStats)> = None;
     let mut done_rounds = 0;
     // violation spots seen in earlier rounds (layer, point, times)

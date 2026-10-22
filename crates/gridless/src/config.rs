@@ -41,6 +41,15 @@ pub enum Direction {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReserveMode {
+    #[default]
+    Auto,
+    Always,
+    Off,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayerRole {
@@ -135,6 +144,9 @@ pub struct Config {
     pub length_groups: Vec<LengthGroupCfg>,
     /// keep existing tracks/vias (true) or rip everything that is not locked (false)
     pub keep_existing: Option<bool>,
+    /// room for length-matching meanders reserved in the topology: "auto" (default: only
+    /// when plain routing leaves a length group short), "always" (TopoR style) or "off"
+    pub length_reserve: Option<ReserveMode>,
     /// SMD pads of plane nets on a layer with a same-net pour are left to the pour
     pub trust_pours: Option<bool>,
     /// router effort: number of negotiation iterations
@@ -219,6 +231,7 @@ pub struct Rules {
     pub diff_pairs: Vec<DiffPair>,
     pub length_groups: Vec<LengthGroup>,
     pub centering: Option<Centering>,
+    pub length_reserve: ReserveMode,
     pub keep_existing: bool,
     pub trust_pours: bool,
     pub force_fanout: Vec<String>,
@@ -381,6 +394,7 @@ impl Rules {
             diff_pairs,
             length_groups,
             centering,
+            length_reserve: cfg.length_reserve.unwrap_or_default(),
             keep_existing: cfg.keep_existing.unwrap_or(false),
             trust_pours: cfg.trust_pours.unwrap_or(true),
             force_fanout: cfg.force_fanout.clone(),

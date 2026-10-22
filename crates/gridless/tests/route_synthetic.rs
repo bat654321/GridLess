@@ -298,3 +298,68 @@ fn smoothing_straightens_entries_and_rounds_kinks() {
     let rep = gridless::drc::check(&l.board, &pb, &rules, &geo);
     assert!(rep.violations.is_empty(), "{:?}", rep.violations);
 }
+
+/// A channel between two walls of touching pins (net W, not routed) with nets N1, D0, N2
+/// running through it on a 0.5 mm pitch from x = 2 to x = 28.
+fn channel_board() -> String {
+    let r = 1.1;
+    let mut pins = Vec::new();
+    let mut i = 0;
+    for &y in &[6.5, 13.5] {
+        let mut x = 1.6;
+        while x < 28.5 {
+            i += 1;
+            pins.push(pad(&format!("{i}"), "thru_hole", "circle", x, y - 10.0, 2.0 * r, 2.0 * r, "\"*.Cu\"", "W"));
+            x += 2.0 * r;
+        }
+    }
+    let mut fps = vec![footprint("J1", 0.0, 10.0, &pins)];
+    for (k, (net, y)) in [("N1", 9.5), ("D0", 10.0), ("N2", 10.5)].iter().enumerate() {
+        fps.push(footprint(&format!("A{k}"), 2.5, *y, &[pad("1", "smd", "rect", 0.0, 0.0, 0.3, 0.3, "\"F.Cu\"", net)]));
+        fps.push(footprint(&format!("B{k}"), 27.5, *y, &[pad("1", "smd", "rect", 0.0, 0.0, 0.3, 0.3, "\"F.Cu\"", net)]));
+    }
+    board(2, &fps)
+}
+
+#[test]
+fn length_reserve_makes_room_for_meanders() {
+    // D0 must grow from 25 to 33 mm, but its neighbours run 0.25 mm away: without a reserve
+    // there is no room for meanders; with it the topology keeps a corridor around D0
+    let src = channel_board();
+    let base = format!("{TOP_ONLY}[[length_groups]]\nmatch = [\"D0\"]\ntarget = 33.0\ntolerance = 0.3\n");
+    let res = |cfg: &str| {
+        let (out, b) = route(&src, cfg);
+        assert!(out.drc.violations.is_empty(), "{:?}", out.drc.violations);
+        assert!(out.drc.unconnected.is_empty(), "{:?}", out.drc.unconnected);
+        let len = gridless::tuning::net_length(&out.geo, b.net_id("D0").unwrap());
+        eprintln!("D0 {len:.3} mm, ok {:?}", out.tuning.iter().map(|t| t.ok).collect::<Vec<_>>());
+        (len, out.tuning.iter().all(|t| t.ok))
+    };
+    let (len_off, ok_off) = res(&format!("length_reserve = \"off\"\n{base}"));
+    assert!(!ok_off, "the test board should be too tight without a reserve ({len_off})");
+    for mode in ["always", "auto"] {
+        let (len, ok) = res(&format!("length_reserve = \"{mode}\"\n{base}"));
+        assert!(ok && (len - 33.0).abs() <= 0.3, "{mode}: {len}");
+    }
+}
+
+#[test]
+fn pair_vias_side_by_side() {
+    // a wall of F.Cu pads across the board: the USB pair has to change layer, and its two
+    // vias must stand side by side, square to the pair (here: same x)
+    let wall: Vec<String> = (0..20).map(|k| pad(&format!("{}", k + 1), "smd", "rect", 0.0, k as f64 + 0.5, 1.0, 1.0, "\"F.Cu\"", "W")).collect();
+    let ends = |r: &str, x: f64| footprint(r, x, 10.0, &[pad("1", "smd", "rect", 0.0, -0.4, 0.4, 0.4, "\"F.Cu\"", "USB_P"), pad("2", "smd", "rect", 0.0, 0.4, 0.4, 0.4, "\"F.Cu\"", "USB_N")]);
+    let fps = vec![footprint("J1", 15.0, 0.0, &wall), ends("U1", 4.0), ends("U2", 26.0)];
+    let (out, b) = route(&board(2, &fps), "[[nets]]\nmatch = [\"W\"]\nskip = true\n");
+    assert!(out.drc.violations.is_empty(), "{:?}", out.drc.violations);
+    assert!(out.drc.unconnected.is_empty(), "{:?}", out.drc.unconnected);
+    let (pn, nn) = (b.net_id("USB_P").unwrap(), b.net_id("USB_N").unwrap());
+    let pv: Vec<_> = out.geo.vias.iter().filter(|v| v.1 == pn).map(|v| v.0).collect();
+    let nv: Vec<_> = out.geo.vias.iter().filter(|v| v.1 == nn).map(|v| v.0).collect();
+    assert!(!pv.is_empty() && pv.len() == nv.len(), "{pv:?} {nv:?}");
+    for p in &pv {
+        let n = nv.iter().min_by(|a, b| a.dist(*p).partial_cmp(&b.dist(*p)).unwrap()).unwrap();
+        assert!((n.x - p.x).abs() < 0.05, "pair vias not side by side: {p:?} {n:?}");
+        assert!(n.dist(*p) < 1.0, "pair vias too far apart: {p:?} {n:?}");
+    }
+}

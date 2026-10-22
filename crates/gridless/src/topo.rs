@@ -87,6 +87,9 @@ pub struct Router<'a> {
     pub protect_pairs: bool,
     /// PathFinder history cost per layer and edge; survives state restores
     pub hist: Vec<Vec<f32>>,
+    /// per connection: room kept free on each side of the track (length matching
+    /// reserve); the topology and the geometry treat the wire as this much wider
+    pub reserve: Vec<f64>,
     rip_base: f64,
 }
 
@@ -173,7 +176,7 @@ impl<'a> Router<'a> {
             .collect();
         let hist = meshes.iter().map(|m| vec![0.0f32; m.edges.len()]).collect();
         let st = State { wires: Vec::new(), free_wires: Vec::new(), conns: vec![ConnState::default(); pb.conns.len()], layers, site_use: vec![None; pb.sites.len()] };
-        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist }
+        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()] }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -359,6 +362,95 @@ impl<'a> Router<'a> {
         } else {
             0.0
         }
+    }
+
+    /// Centre distance of the two vias of a differential pair: the pair pitch, or the
+    /// via-to-via and hole-to-hole spacing if that is larger.
+    pub fn pair_via_pitch(&self, pi: usize) -> f64 {
+        let dp = &self.rules.diff_pairs[pi];
+        let clr = self.rules.clr(Some(dp.p), Some(dp.n));
+        (dp.width + dp.gap).max(self.rules.via_dia + clr + 0.01).max(self.rules.via_drill + self.rules.hole_to_hole + 0.01)
+    }
+
+    /// For a differential pair follower: where its vias belong, beside each via of its
+    /// leader, square to the leader's direction there. (leader site, one side, other side)
+    pub fn pair_via_targets(&self, c: usize) -> Vec<(u32, P, P)> {
+        let (pi, leader) = match self.pb.conns[c].couple {
+            Some(x) => x,
+            None => return Vec::new(),
+        };
+        if leader {
+            return Vec::new();
+        }
+        let parts = |k: usize| -> Option<(usize, usize)> {
+            match (self.pb.conns[k].a, self.pb.conns[k].b) {
+                (Term::Pad(x), Term::Pad(y)) => {
+                    let (fa, fb) = (self.board.pads[x].footprint, self.board.pads[y].footprint);
+                    Some((fa.min(fb), fa.max(fb)))
+                }
+                _ => None,
+            }
+        };
+        let key = parts(c);
+        let pitch = self.pair_via_pitch(pi);
+        let mut out = Vec::new();
+        for k in 0..self.pb.conns.len() {
+            if self.pb.conns[k].couple != Some((pi, true)) || parts(k) != key || !self.st.conns[k].routed {
+                continue;
+            }
+            let ws = &self.st.conns[k].wires;
+            for i in 0..ws.len().saturating_sub(1) {
+                let (a, b) = (&self.st.wires[ws[i] as usize], &self.st.wires[ws[i + 1] as usize]);
+                let site = match self.meshes[a.li].verts[a.end as usize].site {
+                    Some(s) if self.meshes[b.li].verts[b.start as usize].site == Some(s) => s,
+                    _ => continue,
+                };
+                // direction of the pair through the via, from the anchors it runs between
+                // (embedded crossings are only rough positions on the mesh edges)
+                let at = self.pb.sites[site as usize].pos;
+                let prev = self.meshes[a.li].verts[a.start as usize].pos;
+                let next = self.meshes[b.li].verts[b.end as usize].pos;
+                let din = (at - prev).norm();
+                let dout = (next - at).norm();
+                let d = if (din + dout).len() > 1e-6 { (din + dout).norm() } else { din };
+                let n = d.perp();
+                out.push((site, at + n * pitch, at - n * pitch));
+            }
+        }
+        out
+    }
+
+    /// Exact spots for the follower vias of the differential pairs: each follower via that
+    /// pairs up (in order along the route) with a leader via goes to the target on its own
+    /// side. (follower site, position)
+    pub fn pair_via_spots(&self) -> Vec<(u32, P)> {
+        let mut out = Vec::new();
+        for c in 0..self.pb.conns.len() {
+            if !matches!(self.pb.conns[c].couple, Some((_, false))) || !self.st.conns[c].routed {
+                continue;
+            }
+            let targets = self.pair_via_targets(c);
+            let mine: Vec<u32> = {
+                let ws = &self.st.conns[c].wires;
+                (0..ws.len().saturating_sub(1))
+                    .filter_map(|i| {
+                        let (a, b) = (&self.st.wires[ws[i] as usize], &self.st.wires[ws[i + 1] as usize]);
+                        match self.meshes[a.li].verts[a.end as usize].site {
+                            Some(s) if self.meshes[b.li].verts[b.start as usize].site == Some(s) => Some(s),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+            };
+            if mine.len() != targets.len() {
+                continue;
+            }
+            for (&s, &(_, t1, t2)) in mine.iter().zip(&targets) {
+                let q = self.pb.sites[s as usize].pos;
+                out.push((s, if q.dist(t1) <= q.dist(t2) { t1 } else { t2 }));
+            }
+        }
+        out
     }
 
     /// For a differential pair follower: mask of the layers its leader uses.
@@ -753,8 +845,10 @@ impl<'a> Router<'a> {
         let dst_set: HashSet<(usize, u32)> = dsts.iter().copied().collect();
         let dst_pos: Vec<(usize, P)> = dsts.iter().map(|&(li, v)| (li, self.meshes[li].verts[v as usize].pos)).collect();
         let pair_member = cn.couple.is_some();
-        // follower of a differential pair stays on its leader's layers
+        // follower of a differential pair stays on its leader's layers, and changes layer
+        // right beside the leader's vias (pair vias)
         let lead_mask = self.leader_layers(c);
+        let via_targets: Vec<P> = self.pair_via_targets(c).into_iter().flat_map(|(_, a, b)| [a, b]).collect();
         let lay_k = |li: usize| -> f64 {
             if lead_mask != 0 && lead_mask & (1 << li) == 0 {
                 6.0
@@ -806,8 +900,8 @@ impl<'a> Router<'a> {
         }
         let mut crossed = Vec::new();
         let mut exp = 0usize;
-        let width = cn.width;
-        let wmin = width.min(self.board.rules.min_track_width.max(0.1));
+        let width = cn.width + 2.0 * self.reserve[c];
+        let wmin = cn.width.min(self.board.rules.min_track_width.max(0.1));
         let clr = cn.clearance;
         let mut goal_node = None;
         // differential pair follower: crossing next to the leader is cheaper
@@ -889,7 +983,13 @@ impl<'a> Router<'a> {
                                         continue;
                                     }
                                     if let Some(&vj) = mj.site_vert.get(&s) {
-                                        let g = nd.g + if reuse { 0.5 } else { via_cost } + pen + if lay_k(lj) > 1.0 { via_cost * 4.0 } else { 0.0 };
+                                        let pair_off = if via_targets.is_empty() {
+                                            0.0
+                                        } else {
+                                            let d = via_targets.iter().map(|t| t.dist(self.pb.sites[s as usize].pos)).fold(f64::INFINITY, f64::min);
+                                            via_cost * (d / 0.5).min(4.0)
+                                        };
+                                        let g = nd.g + if reuse { 0.5 } else { via_cost } + pen + pair_off + if lay_k(lj) > 1.0 { via_cost * 4.0 } else { 0.0 };
                                         push(&mut nodes, &mut open, &mut best, SKey::Vert(lj as u8, vj), g, nd.pos, NONE, &[], lj, 0.0);
                                     }
                                 }
@@ -1070,7 +1170,7 @@ impl<'a> Router<'a> {
         sites.dedup();
         let mut wires = Vec::new();
         for (li, sv, xs, ts, ev) in pieces {
-            let w = Wire { conn: c as u32, li, start: sv, end: ev, cross: xs.iter().map(|x| x.0).collect(), tris: ts.clone(), net: cn.net, net2: cn.net2, width: cn.width, clr: cn.clearance, alive: true, couple: cn.couple, xw: xs.iter().map(|x| x.2).collect() };
+            let w = Wire { conn: c as u32, li, start: sv, end: ev, cross: xs.iter().map(|x| x.0).collect(), tris: ts.clone(), net: cn.net, net2: cn.net2, width: cn.width + 2.0 * self.reserve[c], clr: cn.clearance, alive: true, couple: cn.couple, xw: xs.iter().map(|x| x.2).collect() };
             let wid = self.alloc_wire(w);
             // insert crossings
             let mut inserted: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -1561,7 +1661,7 @@ impl<'a> Router<'a> {
     }
 
     /// Rough length of a routed connection from its embedded polylines.
-    fn conn_length(&self, c: usize) -> f64 {
+    pub fn conn_length(&self, c: usize) -> f64 {
         let mut l = 0.0;
         for &wi in &self.st.conns[c].wires {
             let w = &self.st.wires[wi as usize];

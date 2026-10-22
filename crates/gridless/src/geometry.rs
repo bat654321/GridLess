@@ -55,6 +55,9 @@ pub struct GWire {
     pub cw: Vec<f64>,
     /// per crossing: window around its equal-gap slot between two pads (centring)
     pub win: Vec<Option<(f64, f64)>>,
+    /// room kept free on each side for length-matching meanders: `width` includes it,
+    /// the drawn track does not
+    pub reserve: f64,
 }
 
 impl GWire {
@@ -1486,6 +1489,42 @@ fn trace(m: &Mesh, sv: u32, ev: u32, pts: &[P]) -> Option<(Vec<u32>, Vec<f64>, V
     Some((xe, xt, tris))
 }
 
+/// Can a via of `net` stand at q: inside the board, clear of foreign copper, keepouts,
+/// holes and the other vias?
+fn via_spot_ok(pb: &Problem, rules: &Rules, q: P, net: NetId, others: &[(P, NetId)]) -> bool {
+    let vr = rules.via_dia / 2.0;
+    if !crate::problem::inside_board(q, &pb.outline) {
+        return false;
+    }
+    for poly in &pb.outline {
+        for k in 0..poly.len() {
+            if point_seg_dist(q, poly[k], poly[(k + 1) % poly.len()]) < vr + rules.edge_clearance + GEOM_MARGIN {
+                return false;
+            }
+        }
+    }
+    for o in &pb.obstacles {
+        if o.kind == ObsKind::Keepout {
+            if crate::geom::point_in_poly(q, &o.shape.pts) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(d) = o.drill {
+            if q.dist(o.shape.centroid()) < d / 2.0 + rules.via_drill / 2.0 + rules.hole_to_hole {
+                return false;
+            }
+        }
+        if o.net != Some(net) && o.shape.dist(q) < vr + gclr(rules, Some(net), o.net) {
+            return false;
+        }
+    }
+    others.iter().all(|&(p2, n2)| {
+        let d = q.dist(p2);
+        d >= rules.via_drill + rules.hole_to_hole && (n2 == net || d >= rules.via_dia + gclr(rules, Some(net), Some(n2)))
+    })
+}
+
 /// For every edge that runs through free space between the copper of two different
 /// obstacles (pads, vias, fixed copper; not keepouts or the board edge): how far the
 /// copper of each end reaches along the edge.
@@ -1580,7 +1619,17 @@ pub struct Geometry {
 pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
     let emb = r.embed();
     let via_r = rules.via_dia / 2.0;
-    let used: Vec<(u32, P, NetId)> = r.st.site_use.iter().enumerate().filter_map(|(s, u)| u.map(|(n, _)| (s as u32, pb.sites[s].pos, n))).collect();
+    let mut used: Vec<(u32, P, NetId)> = r.st.site_use.iter().enumerate().filter_map(|(s, u)| u.map(|(n, _)| (s as u32, pb.sites[s].pos, n))).collect();
+    // differential pair vias side by side: a follower's via moves from its lattice site to
+    // the exact spot beside its leader's via, when that spot is clear
+    for (s, q) in r.pair_via_spots() {
+        if let Some(i) = used.iter().position(|u| u.0 == s) {
+            let others: Vec<(P, NetId)> = used.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, u)| (u.1, u.2)).collect();
+            if via_spot_ok(pb, rules, q, used[i].2, &others) {
+                used[i].1 = q;
+            }
+        }
+    }
     // layers are independent: one thread each
     use rayon::prelude::*;
     let per_layer: Vec<(LayerGeom, Vec<String>)> = r.meshes.par_iter().enumerate().map(|(li, rm)| {
@@ -1678,6 +1727,7 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
                 neck: [neck_width(r, &lg.mesh, sv, tw.width, rules), neck_width(r, &lg.mesh, ev, tw.width, rules)],
                 cw: Vec::new(),
                 win: vec![None; n],
+                reserve: r.reserve[tw.conn as usize],
                 follow: match tw.couple {
                     Some((pi, false)) => Some((rules.diff_pairs[pi].p, rules.diff_pairs[pi].width + rules.diff_pairs[pi].gap)),
                     _ => None,
@@ -1853,7 +1903,10 @@ fn build_tracks(r: &Router, pb: &Problem, rules: &Rules, layers: &[LayerGeom]) -
                 }
                 _ => {
                     let (prims, pw) = lg.prims_w(wi);
-                    tracks.push(Track { layer: lg.layer, net: w.net, width: w.width, conn: w.conn, prims, pw })
+                    // the length-matching reserve is room around the track, not copper
+                    let real = w.width - 2.0 * w.reserve;
+                    let pw = pw.into_iter().map(|x| x.min(real)).collect();
+                    tracks.push(Track { layer: lg.layer, net: w.net, width: real, conn: w.conn, prims, pw })
                 }
             }
         }
