@@ -85,18 +85,13 @@ class GridlessAction(pcbnew.ActionPlugin):
         keep, rounds, kicad_check = opts
         project = os.path.splitext(path)[0] + ".kicad_pro"
         try:
-            import wx
-
-            busy = wx.BusyInfo("GridLess is routing the board...")
-        except Exception:
-            busy = None
-        try:
-            result = gc.run_router(path, project, gc.config_for(path), keep, rounds, kicad_check=kicad_check)
+            result = gc.run_router_with_window(path, project, gc.config_for(path), keep, rounds, kicad_check=kicad_check)
+        except gc.Cancelled:
+            gc.message("Routing cancelled: the board was not changed.")
+            return
         except Exception as e:  # noqa: BLE001
-            del busy
             gc.message("Routing failed:\n%s" % e)
             return
-        del busy
         n = apply_result(board, result, keep)
         pcbnew.Refresh()
         gc.message("Added %d items.\n\n%s\n\nRefill zones (B) to update copper pours." % (n, gc.summary(result)))

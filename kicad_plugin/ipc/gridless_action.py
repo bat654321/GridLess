@@ -44,7 +44,11 @@ def main():
     with open(tmp_pcb, "w", encoding="utf-8") as f:
         f.write(board.get_as_string())
     project = os.path.join(proj_dir, stem + ".kicad_pro")
-    result = gc.run_router(tmp_pcb, project, gc.config_for(orig_path), keep, rounds, log=print, kicad_check=kicad_check)
+    try:
+        result = gc.run_router_with_window(tmp_pcb, project, gc.config_for(orig_path), keep, rounds, kicad_check=kicad_check)
+    except gc.Cancelled:
+        gc.message("Routing cancelled: the board was not changed.")
+        return
 
     nets = {n.name: n for n in board.get_nets()}
     items = []
