@@ -756,12 +756,16 @@ impl LayerGeom {
     }
 
     /// One Gauss–Seidel sweep. Returns max parameter change and count of infeasible crossings.
-    fn sweep(&mut self, rules: &Rules) -> (f64, usize) {
+    fn sweep(&mut self, rules: &Rules, backward: bool) -> (f64, usize) {
         let mut maxd: f64 = 0.0;
         let mut infeasible = 0;
-        for wi in 0..self.wires.len() {
+        // alternating the direction carries changes along long wires both ways
+        let nw = self.wires.len();
+        for wo in 0..nw {
+            let wi = if backward { nw - 1 - wo } else { wo };
             let n = self.wires[wi].xe.len();
-            for k in 0..n {
+            for ko in 0..n {
+                let k = if backward { n - 1 - ko } else { ko };
                 let (lo, hi) = self.bounds(wi as u32, k, rules);
                 let w = &self.wires[wi];
                 let e = w.xe[k];
@@ -781,35 +785,66 @@ impl LayerGeom {
                     let vs: Vec<f64> = ts.iter().map(|&t| viol(t)).collect();
                     let feas: Vec<bool> = vs.iter().map(|&v| v <= 1e-6).collect();
                     if feas.iter().all(|&x| x) {
-                        Ok((lo, hi))
-                    } else if let Some(seed) = (0..=NS).filter(|&i| feas[i]).min_by(|&i, &j| f(ts[i]).partial_cmp(&f(ts[j])).unwrap()) {
-                        // grow the feasible run around the best feasible sample
-                        let (mut i0, mut i1) = (seed, seed);
-                        while i0 > 0 && feas[i0 - 1] {
-                            i0 -= 1;
-                        }
-                        while i1 < NS && feas[i1 + 1] {
-                            i1 += 1;
-                        }
-                        let refine = |good: f64, bad: f64| {
-                            let (mut g, mut b) = (good, bad);
-                            for _ in 0..30 {
-                                let m = 0.5 * (g + b);
-                                if viol(m) <= 1e-6 {
-                                    g = m;
-                                } else {
-                                    b = m;
-                                }
+                        return Ok((lo, hi));
+                    }
+                    let refine = |good: f64, bad: f64| {
+                        let (mut g, mut b) = (good, bad);
+                        for _ in 0..30 {
+                            let m = 0.5 * (g + b);
+                            if viol(m) <= 1e-6 {
+                                g = m;
+                            } else {
+                                b = m;
                             }
-                            g
-                        };
-                        let a = if i0 > 0 { refine(ts[i0], ts[i0 - 1]) } else { ts[0] };
-                        let b = if i1 < NS { refine(ts[i1], ts[i1 + 1]) } else { ts[NS] };
-                        Ok((a, b))
+                        }
+                        g
+                    };
+                    // runs of feasible samples, each with its best sampled objective
+                    let mut runs: Vec<(usize, usize, f64)> = Vec::new();
+                    let mut i = 0;
+                    while i <= NS {
+                        if feas[i] {
+                            let i0 = i;
+                            while i < NS && feas[i + 1] {
+                                i += 1;
+                            }
+                            let best = (i0..=i).map(|j| f(ts[j])).fold(f64::INFINITY, f64::min);
+                            runs.push((i0, i, best));
+                        }
+                        i += 1;
+                    }
+                    // the run the crossing stands in now: it stays there unless another run
+                    // is clearly shorter (else such crossings hop between the two sides of an
+                    // obstacle sweep after sweep)
+                    let o = old.clamp(lo, hi);
+                    let here = if viol(o) <= 1e-6 {
+                        match runs.iter().position(|&(i0, i1, _)| ts[i0.saturating_sub(1)] <= o && o <= ts[(i1 + 1).min(NS)]) {
+                            Some(r) => Some(runs[r]),
+                            None => {
+                                // a narrow clean gap between the samples
+                                let j = ((o - lo) / (hi - lo).max(1e-12) * NS as f64).floor().clamp(0.0, (NS - 1) as f64) as usize;
+                                return Ok((refine(o, ts[j]), refine(o, ts[j + 1])));
+                            }
+                        }
                     } else {
-                        // nothing feasible: least violation
-                        let i = (0..=NS).min_by(|&i, &j| vs[i].partial_cmp(&vs[j]).unwrap()).unwrap();
-                        Err(ts[i])
+                        None
+                    };
+                    let best = runs.iter().copied().min_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+                    let pick = match (here, best) {
+                        (Some(h), Some(b)) if h.2 <= b.2 + 1e-3 => Some(h),
+                        (_, b) => b,
+                    };
+                    match pick {
+                        Some((i0, i1, _)) => {
+                            let a = if i0 > 0 { refine(ts[i0], ts[i0 - 1]) } else { ts[0] };
+                            let b = if i1 < NS { refine(ts[i1], ts[i1 + 1]) } else { ts[NS] };
+                            Ok((a, b))
+                        }
+                        None => {
+                            // nothing feasible: least violation
+                            let i = (0..=NS).min_by(|&i, &j| vs[i].partial_cmp(&vs[j]).unwrap()).unwrap();
+                            Err(ts[i])
+                        }
                     }
                 };
                 let (lo, hi, ok) = if lo <= hi {
@@ -905,6 +940,202 @@ impl LayerGeom {
         }
     }
 
+    /// Relaxation of the wire positions: a block step every few sweeps (each wire pulled
+    /// straight through its corridor at once, `funnel_step`) and coordinate sweeps that
+    /// alternate direction in between (arcs, clearances, bundles). `hook` runs before every
+    /// sweep. Stops after `min` sweeps once nothing moves. Returns (sweeps, last change,
+    /// crossings without a clean position).
+    fn relax(&mut self, rules: &Rules, min: usize, max: usize, mut hook: impl FnMut(&mut Self, usize)) -> (usize, f64, usize) {
+        let debug = std::env::var("GRIDLESS_DEBUG_SWEEP").is_ok();
+        let mut it = 0;
+        let mut prev: Vec<Vec<f64>> = Vec::new();
+        let mut last_len = f64::INFINITY;
+        let (mut best_len, mut stall) = (f64::INFINITY, 0);
+        loop {
+            hook(self, it);
+            self.update_rho(rules);
+            // block steps: the funnel straightens wires early on, extrapolation then
+            // takes the long slow creeps in one go
+            let df = if it < 12 && it % 4 == 0 {
+                self.funnel_step(rules)
+            } else if it % 3 == 2 && !prev.is_empty() {
+                self.extrapolate_step(rules, &prev)
+            } else {
+                0.0
+            };
+            if df > 0.0 {
+                self.update_rho(rules);
+            }
+            prev = self.wires.iter().map(|w| w.xt.clone()).collect();
+            let before = if debug && it + 3 >= max { prev.clone() } else { Vec::new() };
+            let (ds, inf) = self.sweep(rules, it % 2 == 1);
+            for (wi, w) in self.wires.iter().enumerate().filter(|_| !before.is_empty()) {
+                for k in 0..w.xt.len() {
+                    if (w.xt[k] - before[wi][k]).abs() > 5e-5 {
+                        eprintln!("sweep {it} layer {} wire {wi} net {} k {k}: {:.4} -> {:.4} at {:?}", self.layer, w.net, before[wi][k], w.xt[k], self.wpt(w, k + 1));
+                    }
+                }
+            }
+            it += 1;
+            let d = ds.max(df);
+            // done when nothing moves, when what still creeps (well under a micrometre per
+            // sweep) no longer shortens the layer measurably, or when the layer has stopped
+            // getting shorter at all: squeezed crossings without a clean spot can push each
+            // other round in circles, and more sweeps change nothing for the better
+            let len = self.total_len();
+            let settled = d < 2e-5 || (d < 1e-3 && last_len - len < 1e-5);
+            last_len = len;
+            if len < best_len - 1e-5 {
+                (best_len, stall) = (len, 0);
+            } else {
+                stall += 1;
+            }
+            if ((settled || stall >= 8) && it >= min) || it >= max {
+                return (it, d, inf);
+            }
+        }
+    }
+
+    /// Objective of all wires on the layer (length with arcs and centring penalties).
+    fn total_len(&self) -> f64 {
+        let mut len = 0.0;
+        for w in &self.wires {
+            for k in 0..=w.xe.len() {
+                len += self.chord_len(w, k, self.wpt(w, k), self.wpt(w, k + 1));
+            }
+        }
+        len
+    }
+
+    /// (objective, total clearance violation) of wire wi as it lies now.
+    fn wire_score(&self, wi: usize, rules: &Rules) -> (f64, f64) {
+        let w = &self.wires[wi];
+        let (mut len, mut bad) = (0.0, 0.0);
+        for k in 0..=w.xe.len() {
+            let (a, b) = (self.wpt(w, k), self.wpt(w, k + 1));
+            len += self.chord_len(w, k, a, b);
+            bad += self.chord_viol(wi, k, a, b, rules).max(0.0);
+        }
+        (len, bad)
+    }
+
+    /// Extrapolation step: where the sweeps keep moving a wire the same way (they creep
+    /// along long wires, a little per sweep), try 3, 9, 27... times that last move at once
+    /// and keep the shortest clean result. `prev` = positions before the last sweep.
+    fn extrapolate_step(&mut self, rules: &Rules, prev: &[Vec<f64>]) -> f64 {
+        let mut maxd: f64 = 0.0;
+        for wi in 0..self.wires.len() {
+            let n = self.wires[wi].xe.len();
+            let d: Vec<f64> = (0..n).map(|k| self.wires[wi].xt[k] - prev[wi][k]).collect();
+            if d.iter().all(|x| x.abs() < 1e-7) {
+                continue;
+            }
+            let lims: Vec<(f64, f64)> = (0..n).map(|k| self.bounds(wi as u32, k, rules)).collect();
+            let base = self.wires[wi].xt.clone();
+            let (l0, v0) = self.wire_score(wi, rules);
+            let mut best: Option<(f64, Vec<f64>)> = None;
+            for m in [3.0, 9.0, 27.0, 81.0] {
+                let cand: Vec<f64> = (0..n)
+                    .map(|k| {
+                        let (lo, hi) = lims[k];
+                        let t = base[k] + m * d[k];
+                        if lo <= hi {
+                            t.clamp(lo, hi)
+                        } else {
+                            base[k]
+                        }
+                    })
+                    .collect();
+                self.wires[wi].xt = cand.clone();
+                let (l, v) = self.wire_score(wi, rules);
+                if v <= v0 + 1e-9 && l < best.as_ref().map_or(l0 - 1e-9, |b| b.0) {
+                    best = Some((l, cand));
+                } else {
+                    break; // the gain has turned
+                }
+            }
+            match best {
+                Some((_, xt)) => {
+                    for k in 0..n {
+                        maxd = maxd.max((xt[k] - base[k]).abs());
+                    }
+                    self.wires[wi].xt = xt;
+                }
+                None => self.wires[wi].xt = base,
+            }
+        }
+        maxd
+    }
+
+    /// Block step of the relaxation: every wire is pulled straight through its corridor at
+    /// once - the funnel (string pulling) over the current bounds of its crossings, the
+    /// other wires held still. Crossing-by-crossing descent needs hundreds of sweeps to
+    /// straighten a long wire; this does it in one. The funnel knows no arcs, so a wire
+    /// takes the new positions only when they are no longer and no less clean (in practice:
+    /// early on, while wires are still far from tight). Returns the largest move.
+    fn funnel_step(&mut self, rules: &Rules) -> f64 {
+        let mut maxd: f64 = 0.0;
+        let score = |lg: &Self, wi: usize| lg.wire_score(wi, rules);
+        for wi in 0..self.wires.len() {
+            let n = self.wires[wi].xe.len();
+            if n == 0 {
+                continue;
+            }
+            let mut portals = Vec::with_capacity(n);
+            let mut lims = Vec::with_capacity(n);
+            for k in 0..n {
+                let (mut lo, mut hi) = self.bounds(wi as u32, k, rules);
+                if !(lo <= hi) {
+                    break;
+                }
+                if let Some((a, b)) = self.wires[wi].win[k] {
+                    (lo, hi) = (a.clamp(lo, hi), b.clamp(lo, hi));
+                }
+                let w = &self.wires[wi];
+                let e = w.xe[k];
+                let tri = &self.mesh.tris[w.tris[k] as usize];
+                // exiting a CCW triangle: v[le] is on the right
+                let fwd = self.mesh.edges[e as usize].v[0] == tri.v[tri.edge_idx(e)];
+                let (pl, ph) = (self.edge_pt(e, lo), self.edge_pt(e, hi));
+                portals.push(if fwd { (ph, pl) } else { (pl, ph) });
+                lims.push((lo, hi));
+            }
+            if lims.len() < n {
+                continue; // a crossing without room: leave the wire to the sweeps
+            }
+            let w = &self.wires[wi];
+            let path = funnel(w.start, w.end, &portals);
+            let mut next = w.xt.clone();
+            let mut j = 0;
+            for k in 0..n {
+                let ed = &self.mesh.edges[w.xe[k] as usize];
+                let (a, b) = (self.vpos(ed.v[0]), self.vpos(ed.v[1]));
+                let (lo, hi) = lims[k];
+                for jj in j..path.len().saturating_sub(1) {
+                    if let Some((u, sp)) = crate::geom::line_intersect(a, b, path[jj], path[jj + 1]) {
+                        let t = u * ed.len;
+                        if (-1e-6..=1.0 + 1e-6).contains(&sp) && t >= lo - 1e-6 && t <= hi + 1e-6 {
+                            next[k] = t.clamp(lo, hi);
+                            j = jj;
+                            break;
+                        }
+                    }
+                }
+            }
+            let (l0, v0) = score(self, wi);
+            let old = std::mem::replace(&mut self.wires[wi].xt, next);
+            let (l1, v1) = score(self, wi);
+            if v1 <= v0 + 1e-9 && l1 <= l0 + 1e-9 {
+                for k in 0..n {
+                    maxd = maxd.max((self.wires[wi].xt[k] - old[k]).abs());
+                }
+            } else {
+                self.wires[wi].xt = old;
+            }
+        }
+        maxd
+    }
+
     /// Gap equalisation on a relaxed layer: pull the crossings into their centring windows
     /// and let the rest of every wire settle around them.
     fn equalise_gaps(&mut self, rules: &Rules, radar: &crate::config::Centering) {
@@ -912,20 +1143,12 @@ impl LayerGeom {
         // the slots depend on the crossing angles, which move with the tracks: refresh
         // them a few times, then freeze them so that the relaxation can settle
         const REFRESH: usize = 20;
-        const MAX: usize = 50;
-        let mut it = 0;
-        loop {
-            self.update_rho(rules);
+        let (it, d, _) = self.relax(rules, REFRESH + 1, 50, |lg, it| {
             if it % 5 == 0 && it <= REFRESH {
-                self.update_windows(rules, radar);
+                lg.update_windows(rules, radar);
             }
-            let (d, _) = self.sweep(rules);
-            it += 1;
-            if (d < 2e-5 && it > REFRESH) || it >= MAX {
-                log::info!("layer {}: gaps equalised in {} sweeps (last change {:.2e})", self.layer, it, d);
-                break;
-            }
-        }
+        });
+        log::info!("layer {}: gaps equalised in {} sweeps (last change {:.2e})", self.layer, it, d);
     }
 
     /// Build primitives (segments + arcs) of wire wi.
@@ -1358,9 +1581,10 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
     let emb = r.embed();
     let via_r = rules.via_dia / 2.0;
     let used: Vec<(u32, P, NetId)> = r.st.site_use.iter().enumerate().filter_map(|(s, u)| u.map(|(n, _)| (s as u32, pb.sites[s].pos, n))).collect();
-    let mut layers = Vec::new();
-    let mut warnings = Vec::new();
-    for (li, rm) in r.meshes.iter().enumerate() {
+    // layers are independent: one thread each
+    use rayon::prelude::*;
+    let per_layer: Vec<(LayerGeom, Vec<String>)> = r.meshes.par_iter().enumerate().map(|(li, rm)| {
+        let mut warnings = Vec::new();
         let layer = rm.layer;
         let mut obs: Vec<MObs> = rm.obs.clone();
         for &(_, pos, net) in &used {
@@ -1555,30 +1779,14 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
             }
         }
         // ---- relax
-        let mut it = 0;
-        let mut infeasible;
-        loop {
-            lg.update_rho(rules);
-            let (d, inf) = lg.sweep(rules);
-            infeasible = inf;
-            it += 1;
-            if (d < 2e-5 && it > 3) || it >= 200 {
-                log::info!("layer {}: relaxed in {} sweeps (last change {:.2e}, infeasible crossings {})", layer, it, d, inf);
-                break;
-            }
-        }
+        let t_relax = std::time::Instant::now();
+        let (it, d, infeasible) = lg.relax(rules, 4, 200, |_, _| {});
+        log::info!("layer {}: relaxed in {} sweeps (last change {:.2e}, infeasible crossings {}) in {} ms", layer, it, d, infeasible, t_relax.elapsed().as_millis());
         lg.update_rho(rules);
         // neck down where room is short, then let positions settle with the new widths
         for _ in 0..3 {
             lg.auto_neck(rules, r.board.rules.min_track_width);
-            lg.update_rho(rules);
-            for _ in 0..25 {
-                lg.update_rho(rules);
-                let (d, _) = lg.sweep(rules);
-                if d < 2e-5 {
-                    break;
-                }
-            }
+            lg.relax(rules, 1, 25, |_, _| {});
         }
         // ---- centring: spread the tracks evenly between neighbouring pads
         if let Some(radar) = rules.centering {
@@ -1591,7 +1799,13 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
         if infeasible > 0 {
             warnings.push(format!("layer {layer}: {infeasible} crossings without enough room"));
         }
+        (lg, warnings)
+    }).collect();
+    let mut layers = Vec::new();
+    let mut warnings = Vec::new();
+    for (lg, w) in per_layer {
         layers.push(lg);
+        warnings.extend(w);
     }
     let tracks = build_tracks(r, pb, rules, &layers);
     let vias = used.iter().map(|&(_, pos, n)| (pos, n)).collect();
@@ -1673,13 +1887,14 @@ pub fn equalise(r: &Router, pb: &Problem, rules: &Rules, geo: &mut Geometry) {
         Some(c) => c,
         None => return,
     };
-    for lg in geo.layers.iter_mut() {
+    use rayon::prelude::*;
+    geo.layers.par_iter_mut().for_each(|lg| {
         lg.equalise_gaps(rules, &radar);
         lg.update_rho(rules);
         lg.auto_neck(rules, r.board.rules.min_track_width);
         lg.update_rho(rules);
         lg.debug_net(r, rules);
-    }
+    });
     geo.tracks = build_tracks(r, pb, rules, &geo.layers);
 }
 
