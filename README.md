@@ -80,6 +80,20 @@ includes it. On Linux, the external Python that KiCad chooses may not; in that
 case the plugin still routes, using the default options and printing the report.
 Install `wxPython` if you want the dialogs there, or use the classic plugin.
 
+### Third-party PCM repository (available now)
+
+The package is also served from a small repository on GitHub Pages, so it can be
+installed and updated through KiCad before it appears in the official catalogue.
+In **Tools → Plugin and Content Manager → Manage repositories**, add:
+
+```
+https://bat654321.github.io/GridLess/repository.json
+```
+
+Then GridLess appears in the PCM package list. The official KiCad repository
+submission is open at
+[kicad/addons/metadata!759](https://gitlab.com/kicad/addons/metadata/-/merge_requests/759).
+
 ### Classic plugin and manual install
 
 The repository also contains the classic SWIG action plugin, which works without

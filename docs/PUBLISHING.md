@@ -96,6 +96,50 @@ If the archive content changes, bump the version, rebuild, upload a new release
 asset and update `download_url`, `download_sha256`, `download_size` and
 `install_size` in a new merge request.
 
+## 3a. Third-party PCM repository (already live)
+
+The official catalogue can take days or weeks, so the same package is also served
+from GitHub Pages:
+
+- branch `gh-pages` in the same repository;
+- `repository.json`, `packages.json` and `resources.zip` at its root;
+- public URL: `https://bat654321.github.io/GridLess/repository.json`.
+
+Users add that URL in **Plugin and Content Manager → Manage repositories**. The
+package then appears and updates through the PCM. This is a legitimate KiCad
+feature and does not conflict with the official submission.
+
+To update it after a release:
+
+1. Copy `dist/metadata.json` (or the `pcm-metadata` workflow artifact) into
+   `packages.json` as `{"packages": [<metadata>]}`.
+2. Recompute the SHA-256 of `packages.json`.
+3. Put the new icon under `resources/<identifier>/icon.png`, zip it as
+   `resources.zip`, and recompute its SHA-256.
+4. Update both hashes, `update_timestamp` and `update_time_utc` in
+   `repository.json`.
+5. Commit and push to `gh-pages`. GitHub Pages rebuilds automatically.
+
+`kicad_plugin/pcm/` contains the build script; the repository layout is small
+enough to maintain by hand.
+
+### GitLab CI and identity verification
+
+GitLab.com requires **identity verification** before it will run CI jobs for an
+account. The verification options (phone or credit card) are not available in
+every country. If the submitter cannot complete it:
+
+- the merge request is still created and is mergeable if the upstream project does
+  not require a successful pipeline;
+- post a comment explaining the situation and include the output of the
+  repository's own `ci/validate-package.py`;
+- ask a KiCad maintainer to run the validation, or add a co-maintainer in a
+  supported country who can push the branch and run the pipeline.
+
+Do not try to bypass the verification with a borrowed identity, number or card.
+The package itself is unaffected: the validator can be run locally against the
+public release asset.
+
 ## 4. Announce
 
 Do not spray the same text everywhere. Lead with the differentiator and show the
