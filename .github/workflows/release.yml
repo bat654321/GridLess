@@ -27,12 +27,12 @@ jobs:
             artifact: gridless-linux
             binary: gridless
             archive: gridless-linux-x86_64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: gridless-macos-arm64
             binary: gridless
             archive: gridless-macos-arm64
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: gridless-macos-x86_64
             binary: gridless
@@ -62,6 +62,7 @@ jobs:
   package:
     name: PCM package and release
     needs: build
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,30 +88,53 @@ jobs:
       - name: Build PCM archive
         shell: bash
         run: |
+          args=()
+          if [[ -f artifacts/gridless-windows/gridless.exe ]]; then
+            args+=(--windows artifacts/gridless-windows/gridless.exe)
+          fi
+          if [[ -f artifacts/gridless-linux/gridless-linux-x86_64 ]]; then
+            args+=(--linux artifacts/gridless-linux/gridless-linux-x86_64)
+          fi
+          if [[ -f artifacts/gridless-macos-arm64/gridless-macos-arm64 ]]; then
+            args+=(--macos-arm64 artifacts/gridless-macos-arm64/gridless-macos-arm64)
+          fi
+          if [[ -f artifacts/gridless-macos-x86_64/gridless-macos-x86_64 ]]; then
+            args+=(--macos-x86_64 artifacts/gridless-macos-x86_64/gridless-macos-x86_64)
+          fi
+          if [[ ${#args[@]} -eq 0 ]]; then
+            echo "No platform binaries were built; nothing to package."
+            exit 1
+          fi
           python kicad_plugin/pcm/build_pcm.py \
             --version "${{ steps.version.outputs.version }}" \
             --identifier "com.github.${{ github.repository_owner }}.gridless" \
             --author "${{ github.repository_owner }}" \
             --author-url "https://github.com/${{ github.repository }}" \
             --download-url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/gridless-${{ steps.version.outputs.version }}-pcm.zip" \
-            --windows artifacts/gridless-windows/gridless.exe \
-            --linux artifacts/gridless-linux/gridless-linux-x86_64 \
-            --macos-arm64 artifacts/gridless-macos-arm64/gridless-macos-arm64 \
-            --macos-x86_64 artifacts/gridless-macos-x86_64/gridless-macos-x86_64
+            "${args[@]}"
 
       - name: Build command-line archives
         shell: bash
         run: |
           mkdir -p cli/windows cli/linux cli/macos-arm64 cli/macos-x86_64
-          cp artifacts/gridless-windows/gridless.exe cli/windows/
-          cp artifacts/gridless-linux/gridless-linux-x86_64 cli/linux/gridless
-          cp artifacts/gridless-macos-arm64/gridless-macos-arm64 cli/macos-arm64/gridless
-          cp artifacts/gridless-macos-x86_64/gridless-macos-x86_64 cli/macos-x86_64/gridless
+          [[ -f artifacts/gridless-windows/gridless.exe ]] && cp artifacts/gridless-windows/gridless.exe cli/windows/
+          [[ -f artifacts/gridless-linux/gridless-linux-x86_64 ]] && cp artifacts/gridless-linux/gridless-linux-x86_64 cli/linux/gridless
+          [[ -f artifacts/gridless-macos-arm64/gridless-macos-arm64 ]] && cp artifacts/gridless-macos-arm64/gridless-macos-arm64 cli/macos-arm64/gridless
+          [[ -f artifacts/gridless-macos-x86_64/gridless-macos-x86_64 ]] && cp artifacts/gridless-macos-x86_64/gridless-macos-x86_64 cli/macos-x86_64/gridless
+          chmod +x cli/linux/gridless cli/macos-arm64/gridless cli/macos-x86_64/gridless 2>/dev/null || true
           cd cli
-          zip -r "../dist/gridless-${{ steps.version.outputs.version }}-windows-x86_64.zip" windows
-          tar -C linux -czf "../dist/gridless-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" gridless
-          tar -C macos-arm64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-arm64.tar.gz" gridless
-          tar -C macos-x86_64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-x86_64.tar.gz" gridless
+          if [[ -f windows/gridless.exe ]]; then
+            zip -r "../dist/gridless-${{ steps.version.outputs.version }}-windows-x86_64.zip" windows
+          fi
+          if [[ -f linux/gridless ]]; then
+            tar -C linux -czf "../dist/gridless-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" gridless
+          fi
+          if [[ -f macos-arm64/gridless ]]; then
+            tar -C macos-arm64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-arm64.tar.gz" gridless
+          fi
+          if [[ -f macos-x86_64/gridless ]]; then
+            tar -C macos-x86_64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-x86_64.tar.gz" gridless
+          fi
 
       - name: Upload release assets
         if: github.ref_type == 'tag'
