@@ -2,6 +2,9 @@
 
 English | [Русский](README.ru.md)
 
+[![CI](https://github.com/bat654321/GridLess/actions/workflows/ci.yml/badge.svg)](https://github.com/bat654321/GridLess/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A gridless, topological autorouter for KiCad 10 — any-angle tracks with arcs,
 differential pairs, length matching and a DRC feedback loop.**
 
