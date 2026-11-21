@@ -2,6 +2,12 @@
 
 *2026-10-20*
 
+*Update 2026-11-21: the plugin now has a progress window with Cancel, a KiCad
+Plugin and Content Manager package, and an interface translated into all 44
+languages shipped with KiCad 10. A faster geometry solver also brought routing
+time down; the timings below are from the first version. The routing limitations
+are still current.*
+
 GridLess is a gridless, topological autorouter for KiCad 10, written in Rust and built in one day of pair work between an engineer and Claude. On the engineer's hand-routed reference board it now routes with zero DRC errors, fewer vias than the hand routing and tracks that run through the middle of pin gaps.
 
 ## Why build it

@@ -1,0 +1,63 @@
+name: Routing problem
+description: The router failed, produced DRC errors, or left connections unrouted
+title: "[routing] "
+labels: ["bug", "routing"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing GridLess. A minimal board is much more useful than a
+        screenshot. Please remove confidential data before attaching files.
+  - type: input
+    id: kicad
+    attributes:
+      label: KiCad version
+      placeholder: "10.0.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: How did you run it?
+      options:
+        - IPC plugin (Enable KiCad API)
+        - Classic SWIG plugin
+        - Command line
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Options and log
+      description: Command line or plugin options, and the router output or final report.
+      render: text
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened, and what did you expect?
+      placeholder: "Two connections left unrouted at the USB connector; DRC reports 3 clearance errors on B.Cu."
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Reproduction files
+      description: Attach a minimal .kicad_pcb, and the .kicad_pro / .gridless.toml if used.
+  - type: checkboxes
+    id: backup
+    attributes:
+      label: Before routing
+      options:
+        - label: I kept a copy of the original board or use version control.
+          required: true

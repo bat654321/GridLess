@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: gridless-windows
+            binary: gridless.exe
+            archive: gridless.exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            artifact: gridless-linux
+            binary: gridless
+            archive: gridless-linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: gridless-macos-arm64
+            binary: gridless
+            archive: gridless-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: gridless-macos-x86_64
+            binary: gridless
+            archive: gridless-macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifacts/${{ matrix.archive }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            codesign --force --sign - "artifacts/${{ matrix.archive }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/${{ matrix.archive }}
+
+  package:
+    name: PCM package and release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "tag=v0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build PCM archive
+        shell: bash
+        run: |
+          python kicad_plugin/pcm/build_pcm.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --identifier "com.github.${{ github.repository_owner }}.gridless" \
+            --author "${{ github.repository_owner }}" \
+            --author-url "https://github.com/${{ github.repository }}" \
+            --download-url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/gridless-${{ steps.version.outputs.version }}-pcm.zip" \
+            --windows artifacts/gridless-windows/gridless.exe \
+            --linux artifacts/gridless-linux/gridless-linux-x86_64 \
+            --macos-arm64 artifacts/gridless-macos-arm64/gridless-macos-arm64 \
+            --macos-x86_64 artifacts/gridless-macos-x86_64/gridless-macos-x86_64
+
+      - name: Build command-line archives
+        shell: bash
+        run: |
+          mkdir -p cli/windows cli/linux cli/macos-arm64 cli/macos-x86_64
+          cp artifacts/gridless-windows/gridless.exe cli/windows/
+          cp artifacts/gridless-linux/gridless-linux-x86_64 cli/linux/gridless
+          cp artifacts/gridless-macos-arm64/gridless-macos-arm64 cli/macos-arm64/gridless
+          cp artifacts/gridless-macos-x86_64/gridless-macos-x86_64 cli/macos-x86_64/gridless
+          cd cli
+          zip -r "../dist/gridless-${{ steps.version.outputs.version }}-windows-x86_64.zip" windows
+          tar -C linux -czf "../dist/gridless-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" gridless
+          tar -C macos-arm64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-arm64.tar.gz" gridless
+          tar -C macos-x86_64 -czf "../dist/gridless-${{ steps.version.outputs.version }}-macos-x86_64.tar.gz" gridless
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+          generate_release_notes: true
+
+      - name: Keep submission metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcm-metadata
+          path: dist/metadata.json
