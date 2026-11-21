@@ -88,8 +88,8 @@ fn track_dist(t: &crate::board::Track, q: P) -> f64 {
             // sample the arc; good enough for a clearance test
             let mut d = f64::INFINITY;
             let mut prev = s;
-            for k in 1..=12 {
-                let u = k as f64 / 12.0;
+            for k in 1..=24 {
+                let u = k as f64 / 24.0;
                 let x = p(
                     (1.0 - u) * (1.0 - u) * s.x + 2.0 * (1.0 - u) * u * m.x + u * u * e.x,
                     (1.0 - u) * (1.0 - u) * s.y + 2.0 * (1.0 - u) * u * m.y + u * u * e.y,
@@ -112,7 +112,7 @@ fn via_clear(b: &Board, rules: &Rules, q: P, net: NetId, vr: f64) -> bool {
             continue;
         }
         let clr = rules.clr(pd.net, Some(net));
-        if pd.shape.dist(q) < vr + clr {
+        if pd.shape.dist(q) < vr + clr + 0.05 {
             return false;
         }
     }
@@ -121,7 +121,7 @@ fn via_clear(b: &Board, rules: &Rules, q: P, net: NetId, vr: f64) -> bool {
             continue;
         }
         let clr = rules.clr(t.net, Some(net));
-        if track_dist(t, q) < vr + t.width / 2.0 + clr {
+        if track_dist(t, q) < vr + t.width / 2.0 + clr + 0.05 {
             return false;
         }
     }
@@ -130,13 +130,23 @@ fn via_clear(b: &Board, rules: &Rules, q: P, net: NetId, vr: f64) -> bool {
             continue;
         }
         let clr = rules.clr(v.net, Some(net));
-        if q.dist(v.pos) < vr + v.dia / 2.0 + clr {
+        if q.dist(v.pos) < vr + v.dia / 2.0 + clr + 0.05 {
             return false;
         }
     }
     for z in &b.zones {
         if let Some(k) = &z.keepout {
             if (k.tracks || k.vias) && z.layers.iter().any(|&l| l == 0 || l < b.layers.len()) && point_in_poly(q, &z.outline) {
+                return false;
+            }
+            continue;
+        }
+        if z.net == Some(net) {
+            continue;
+        }
+        let clr = rules.clr(z.net, Some(net));
+        for (_, poly) in &z.fills {
+            if poly.len() >= 3 && (point_in_poly(q, poly) || poly_dist(q, poly) < vr + clr) {
                 return false;
             }
         }
