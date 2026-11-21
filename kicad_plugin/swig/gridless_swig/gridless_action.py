@@ -80,6 +80,10 @@ class GridlessAction(pcbnew.ActionPlugin):
             self.icon_file_name = icon
 
     def Run(self):
+        try:
+            gc.set_language_hint(pcbnew.GetLanguage())
+        except Exception:  # noqa: BLE001
+            pass
         board = pcbnew.GetBoard()
         path = board.GetFileName()
         if not path or not os.path.isfile(path):
