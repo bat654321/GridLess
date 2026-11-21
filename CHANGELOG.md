@@ -8,6 +8,9 @@ All notable changes to GridLess are recorded here. The format follows
 
 ### Added
 
+- Zones nested in footprints (Altium component keepouts, thermal pours) are read now.
+  Their coordinates are absolute; keepout flags are kept per kind, so a keepout that
+  only blocks pours does not block tracks. The router used to cross XT1's keepout.
 - `pour_keepout` (mm): room around a pad that a same-net pour has to reach. Signal
   routing pays an extra cost there, so the pour stays connected to its pad instead
   of being cut away by a track. Off by default.

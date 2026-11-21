@@ -410,6 +410,37 @@ pub fn load_with_project(path: &Path, project: Option<&Path>) -> Result<Loaded> 
             }
             b.pads.push(Pad { footprint: fi, number, net, pos: abs, shape: RoundPoly { pts: core, r }, layers, kind, drill });
         }
+        // Zones inside a footprint (Altium component keepouts, thermal pours) are stored
+        // in board coordinates. Ignoring them let the router cross XT1's keepout.
+        for z in fl.all("zone") {
+            let net = intern(item_net(z, &numbered).or_else(|| z.vals("net_name").map(|s| s.to_string()).filter(|s| !s.is_empty())), &mut b);
+            let mut names: Vec<&str> = Vec::new();
+            if let Some(l) = z.get("layer") {
+                names.extend(l.texts());
+            }
+            if let Some(l) = z.get("layers") {
+                names.extend(l.texts());
+            }
+            let layers = expand_layers(&names, &b.layers);
+            let keepout = z.get("keepout").map(|k| Keepout {
+                tracks: k.vals("tracks") == Some("not_allowed"),
+                vias: k.vals("vias") == Some("not_allowed"),
+                pads: k.vals("pads") == Some("not_allowed"),
+                pour: k.vals("copperpour") == Some("not_allowed"),
+            });
+            let outline = z.get("polygon").and_then(|pg| pg.get("pts")).map(poly_pts).unwrap_or_default();
+            let priority = z.valf("priority").unwrap_or(0.0) as i32;
+            if !layers.is_empty() && outline.len() >= 3 {
+                let fills = z
+                    .all("filled_polygon")
+                    .filter_map(|fp| {
+                        let l = fp.vals("layer").and_then(|n| b.layers.iter().position(|x| x.name == n))?;
+                        Some((l, fp.get("pts").map(poly_pts).unwrap_or_default()))
+                    })
+                    .collect();
+                b.zones.push(Zone { net, layers, outline, keepout, priority, fills });
+            }
+        }
     }
 
     // ---- board-level graphics (outline)
