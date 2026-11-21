@@ -10,6 +10,12 @@ import pcbnew
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gridless_common as gc  # noqa: E402
 
+try:
+    # Inside KiCad this is the language chosen in Preferences; empty when headless.
+    gc.set_language_hint(pcbnew.GetLanguage())
+except Exception:  # noqa: BLE001
+    pass
+
 
 def _vec(d):
     return pcbnew.VECTOR2I(pcbnew.FromMM(d["x"]), pcbnew.FromMM(d["y"]))
@@ -65,9 +71,9 @@ def apply_result(board, result, keep_existing):
 
 class GridlessAction(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "GridLess: autoroute"
-        self.category = "Routing"
-        self.description = "Gridless topological (any-angle, arcs) autorouter"
+        self.name = gc.tr("GridLess: autoroute")
+        self.category = gc.tr("Routing")
+        self.description = gc.tr("Gridless topological (any-angle, arcs) autorouter")
         self.show_toolbar_button = True
         icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
         if os.path.isfile(icon):
@@ -77,7 +83,7 @@ class GridlessAction(pcbnew.ActionPlugin):
         board = pcbnew.GetBoard()
         path = board.GetFileName()
         if not path or not os.path.isfile(path):
-            gc.message("Save the board first: the router works on the saved .kicad_pcb file.")
+            gc.message(gc.tr("Save the board first: the router works on the saved .kicad_pcb file."))
             return
         opts = gc.ask_options(config_path=gc.config_for(path))
         if opts is None:
@@ -87,11 +93,11 @@ class GridlessAction(pcbnew.ActionPlugin):
         try:
             result = gc.run_router_with_window(path, project, gc.config_for(path), keep, rounds, kicad_check=kicad_check)
         except gc.Cancelled:
-            gc.message("Routing cancelled: the board was not changed.")
+            gc.message(gc.tr("Routing cancelled: the board was not changed."))
             return
         except Exception as e:  # noqa: BLE001
-            gc.message("Routing failed:\n%s" % e)
+            gc.message(gc.tr("Routing failed:\n%s") % e)
             return
         n = apply_result(board, result, keep)
         pcbnew.Refresh()
-        gc.message("Added %d items.\n\n%s\n\nRefill zones (B) to update copper pours." % (n, gc.summary(result)))
+        gc.message(gc.tr("Added %d items.\n\n%s\n\nRefill zones (B) to update copper pours.") % (n, gc.summary(result)))

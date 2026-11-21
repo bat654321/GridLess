@@ -47,7 +47,7 @@ def main():
     try:
         result = gc.run_router_with_window(tmp_pcb, project, gc.config_for(orig_path), keep, rounds, kicad_check=kicad_check)
     except gc.Cancelled:
-        gc.message("Routing cancelled: the board was not changed.")
+        gc.message(gc.tr("Routing cancelled: the board was not changed."))
         return
 
     nets = {n.name: n for n in board.get_nets()}
@@ -87,11 +87,11 @@ def main():
             if old:
                 board.remove_items(old)
         board.create_items(items)
-        board.push_commit(commit, "GridLess autoroute")
+        board.push_commit(commit, gc.tr("GridLess: autoroute"))
     except Exception:
         board.drop_commit(commit)
         raise
-    gc.message("Added %d items.\n\n%s\n\nRefill zones (B) to update copper pours." % (len(items), gc.summary(result)))
+    gc.message(gc.tr("Added %d items.\n\n%s\n\nRefill zones (B) to update copper pours.") % (len(items), gc.summary(result)))
 
 
 if __name__ == "__main__":
@@ -104,5 +104,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # noqa: BLE001
-        gc.message("GridLess failed:\n%s" % e)
+        gc.message(gc.tr("GridLess failed:\n%s") % e)
         raise

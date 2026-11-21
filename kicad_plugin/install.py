@@ -64,6 +64,15 @@ def assemble(dest_swig, dest_ipc, exe):
     for d in (dest_swig, dest_ipc):
         os.makedirs(os.path.join(d, "bin"), exist_ok=True)
         shutil.copy2(os.path.join(HERE, "common", "gridless_common.py"), d)
+        shutil.copy2(os.path.join(HERE, "common", "gridless_i18n.py"), d)
+        license_path = os.path.join(ROOT, "LICENSE")
+        if os.path.isfile(license_path):
+            shutil.copy2(license_path, d)
+        shutil.copytree(
+            os.path.join(HERE, "common", "locales"),
+            os.path.join(d, "locales"),
+            dirs_exist_ok=True,
+        )
         if exe:
             shutil.copy2(exe, os.path.join(d, "bin", EXE))
     for f in ("__init__.py", "gridless_action.py"):
