@@ -90,7 +90,26 @@ pub struct Router<'a> {
     /// per connection: room kept free on each side of the track (length matching
     /// reserve); the topology and the geometry treat the wire as this much wider
     pub reserve: Vec<f64>,
+    /// extra cost multiplier near pads the pour has to reach, per layer and edge
+    pour_e: Vec<Vec<f32>>,
+    /// the same for mesh vertices
+    pour_v: Vec<Vec<f32>>,
     rip_base: f64,
+}
+
+/// How many millimetres of ordinary track one millimetre through a pour pad's escape
+/// area is worth. High enough to send a signal around, not so high that it fails.
+const POUR_COST: f64 = 16.0;
+
+fn pour_penalty(pads: &[(P, f64)], q: P) -> f32 {
+    let mut m = 0.0f64;
+    for (p, r) in pads {
+        let d = q.dist(*p);
+        if d < *r {
+            m = m.max(1.0 - d / *r);
+        }
+    }
+    m as f32
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -175,8 +194,18 @@ impl<'a> Router<'a> {
             .map(|m| LayerState { edge_x: vec![Vec::new(); m.edges.len()], tri_ch: vec![Vec::new(); m.tris.len()] })
             .collect();
         let hist = meshes.iter().map(|m| vec![0.0f32; m.edges.len()]).collect();
+        let pour_e = meshes
+            .iter()
+            .map(|m| {
+                m.edges
+                    .iter()
+                    .map(|e| pour_penalty(&pb.pour_pads, (m.verts[e.v[0] as usize].pos + m.verts[e.v[1] as usize].pos) / 2.0))
+                    .collect()
+            })
+            .collect();
+        let pour_v = meshes.iter().map(|m| m.verts.iter().map(|v| pour_penalty(&pb.pour_pads, v.pos)).collect()).collect();
         let st = State { wires: Vec::new(), free_wires: Vec::new(), conns: vec![ConnState::default(); pb.conns.len()], layers, site_use: vec![None; pb.sites.len()] };
-        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()] }
+        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -1020,6 +1049,7 @@ impl<'a> Router<'a> {
                                 let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * attract(li, eo, g) * lay_k(li);
                                 cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                                 cost += over * 60.0 * self.pres_fac + neck * 15.0 + self.hist[li][eo as usize] as f64 * hist_k;
+                                cost += POUR_COST * self.pour_e[li][eo as usize] as f64 * nd.pos.dist(q);
                                 push(&mut nodes, &mut open, &mut best, SKey::Edge(li8, eo, g, to), nd.g + cost, q, t, &crossed, li, xw);
                             }
                         }
@@ -1036,6 +1066,7 @@ impl<'a> Router<'a> {
                             let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * lay_k(li);
                             cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                             cost += end_pen.get(&(li, u)).copied().unwrap_or(0.0);
+                            cost += POUR_COST * self.pour_v[li][u as usize] as f64 * nd.pos.dist(q);
                             push(&mut nodes, &mut open, &mut best, SKey::Vert(li8, u), nd.g + cost, q, t, &crossed, li, 0.0);
                         }
                     }
@@ -1062,6 +1093,7 @@ impl<'a> Router<'a> {
                             let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * attract(li, e2, g) * lay_k(li);
                             cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                             cost += over * 60.0 * self.pres_fac + neck * 15.0 + self.hist[li][e2 as usize] as f64 * hist_k;
+                            cost += POUR_COST * self.pour_e[li][e2 as usize] as f64 * nd.pos.dist(q);
                             push(&mut nodes, &mut open, &mut best, SKey::Edge(li8, e2, g, t2), nd.g + cost, q, t, &crossed, li, xw);
                         }
                     }

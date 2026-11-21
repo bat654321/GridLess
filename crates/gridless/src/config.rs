@@ -149,6 +149,9 @@ pub struct Config {
     pub length_reserve: Option<ReserveMode>,
     /// SMD pads of plane nets on a layer with a same-net pour are left to the pour
     pub trust_pours: Option<bool>,
+    /// room (mm) around a pad the pour has to reach, where signal routing pays an
+    /// extra cost so it cannot cut the pour away from the pad (0 = off)
+    pub pour_keepout: Option<f64>,
     /// router effort: number of negotiation iterations
     pub iterations: Option<usize>,
     pub seed: Option<u64>,
@@ -234,6 +237,7 @@ pub struct Rules {
     pub length_reserve: ReserveMode,
     pub keep_existing: bool,
     pub trust_pours: bool,
+    pub pour_keepout: f64,
     pub force_fanout: Vec<String>,
     pub iterations: usize,
     pub seed: u64,
@@ -397,6 +401,7 @@ impl Rules {
             length_reserve: cfg.length_reserve.unwrap_or_default(),
             keep_existing: cfg.keep_existing.unwrap_or(false),
             trust_pours: cfg.trust_pours.unwrap_or(true),
+            pour_keepout: cfg.pour_keepout.unwrap_or(0.0),
             force_fanout: cfg.force_fanout.clone(),
             iterations: cfg.iterations.unwrap_or(40),
             seed: cfg.seed.unwrap_or(1),

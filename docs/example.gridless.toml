@@ -5,6 +5,8 @@
 # ---- general (plain keys go before the first [table])
 # keep_existing = false    # true: keep routed tracks, add only what is missing
 # trust_pours = true       # SMD pads of plane nets inside a same-net pour need no via
+# pour_keepout = 0.45       # mm around a pad the pour must reach: signals pay extra there
+#                          # so they cannot cut the pour away from the pad (0 = off)
 # iterations = 40          # negotiation iterations of the topological router
 # length_reserve = "auto"  # room for length-matching meanders kept free already in the
 #                          # topology (as in TopoR): "auto" = only when plain routing leaves

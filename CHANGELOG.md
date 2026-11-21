@@ -6,6 +6,12 @@ All notable changes to GridLess are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `pour_keepout` (mm): room around a pad that a same-net pour has to reach. Signal
+  routing pays an extra cost there, so the pour stays connected to its pad instead
+  of being cut away by a track. Off by default.
+
 ### Changed
 
 - Gap equalisation is no longer dropped for a whole layer when it costs a rule:

@@ -91,6 +91,9 @@ pub struct Problem {
     pub plane_nets: Vec<NetId>,
     /// pads already joined by fixed copper (group representative pad per pad)
     pub pad_group: Vec<usize>,
+    /// pads (position, radius) left to a same-net pour: signal routing pays extra
+    /// near them so it cannot cut the pour away from the pad
+    pub pour_pads: Vec<(P, f64)>,
     /// exit point and stub width of fine-pitch pads (routing starts there)
     pub escape: Vec<Option<(P, f64)>>,
 }
@@ -447,7 +450,23 @@ impl Problem {
             }
         }
         let _ = LayerRole::Signal;
-        Problem { obstacles, outline, sites, conns, route_layers, bbox, plane_nets, pad_group, escape }
+        // Pads the pour has to reach: remember them so the topology can charge extra
+        // for crossing their escape area. A geometric keepout would enclose the pad and
+        // break the mesh; a cost keeps the same promise without touching the geometry.
+        let mut pour_pads = Vec::new();
+        if rules.trust_pours && rules.pour_keepout > 0.0 {
+            for pd in b.pads.iter() {
+                let net = match pd.net {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if pour_covers(b, net, pd) {
+                    let pr = pd.shape.pts.iter().map(|q| q.dist(pd.pos)).fold(0.0, f64::max) + pd.shape.r;
+                    pour_pads.push((pd.pos, pr + rules.pour_keepout));
+                }
+            }
+        }
+        Problem { obstacles, outline, sites, conns, route_layers, bbox, plane_nets, pad_group, pour_pads, escape }
     }
 }
 
