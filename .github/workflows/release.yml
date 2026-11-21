@@ -126,3 +126,9 @@ jobs:
         with:
           name: pcm-metadata
           path: dist/metadata.json
+
+      - name: Keep package archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcm-package
+          path: dist/*.zip
