@@ -216,6 +216,45 @@ pub fn check(b: &Board, pb: &Problem, rules: &Rules, g: &Geometry) -> Report {
             }
         }
     }
+    // same-net pours on outer layers: a pad inside a pour is joined by the pour
+    if rules.trust_pours {
+        for (ni, nr) in rules.nets.iter().enumerate() {
+            if nr.skip || nr.plane.is_some() {
+                continue;
+            }
+            let in_pour: Vec<usize> = (0..n)
+                .filter(|&i| {
+                    items[i].net == Some(ni)
+                        && items[i].desc.starts_with("pad")
+                        && b.zones.iter().any(|z| {
+                            z.keepout.is_none()
+                                && z.net == Some(ni)
+                                && z.fills.iter().any(|(l, poly)| {
+                                    items[i].layers & (1 << l) != 0
+                                        && poly.len() >= 3
+                                        && (crate::geom::point_in_poly(items[i].shape.centroid(), poly)
+                                            || poly
+                                                .iter()
+                                                .zip(poly.iter().cycle().skip(1))
+                                                .take(poly.len())
+                                                .any(|(a, c)| items[i].shape.seg_dist(*a, *c) <= 0.6))
+                                })
+                        })
+                })
+                .collect();
+            if in_pour.len() < 2 {
+                continue;
+            }
+            for w in in_pour.windows(2) {
+                let (ri, rj) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
+                parent[ri] = rj;
+            }
+            if let Some(rest) = (0..n).find(|&i| items[i].net == Some(ni) && !in_pour.contains(&i)) {
+                let (ri, rj) = (find(&mut parent, in_pour[0]), find(&mut parent, rest));
+                parent[ri] = rj;
+            }
+        }
+    }
     let mut unconnected = Vec::new();
     for (ni, net) in b.nets.iter().enumerate() {
         if rules.nets[ni].skip {

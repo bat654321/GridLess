@@ -560,7 +560,7 @@ impl LayerGeom {
     /// The radar turns the resulting gap into a weight: a crossing may leave its slot only
     /// by (1 - weight) of its spare room, so narrow gaps pin the tracks to the slots and
     /// wide ones leave the rubber band free. Pair partners move as one block.
-    fn update_windows(&mut self, rules: &Rules, radar: &crate::config::Centering) {
+    fn update_windows(&mut self, rules: &Rules, radar: &crate::config::Centering, strength: f64) {
         for w in self.wires.iter_mut() {
             w.win.iter_mut().for_each(|x| *x = None);
         }
@@ -642,7 +642,7 @@ impl LayerGeom {
                 if i > 0 {
                     x += coef[i] * pair[i].unwrap_or((wid[i - 1] + wid[i]) / 2.0 + gap(i));
                 }
-                let half = (1.0 - wt) * spare / sins[i];
+                let half = (1.0 - wt * strength) * spare / sins[i];
                 out.push((list[i].0, list[i].1, (x - half, x + half)));
             }
         }
@@ -1141,17 +1141,60 @@ impl LayerGeom {
 
     /// Gap equalisation on a relaxed layer: pull the crossings into their centring windows
     /// and let the rest of every wire settle around them.
+    ///
+    /// The slots are an ideal: in a dense cluster pulling a track all the way into its
+    /// slot can leave less than a rule to a neighbour. Instead of dropping the whole layer
+    /// ("kept off"), try full strength and, if it costs a rule, repeat at half and a
+    /// quarter of the pull — the track still drifts to the middle of the widest free
+    /// channel, just not blindly.
     fn equalise_gaps(&mut self, rules: &Rules, radar: &crate::config::Centering) {
         self.walls = edge_walls(&self.mesh);
-        // the slots depend on the crossing angles, which move with the tracks: refresh
-        // them a few times, then freeze them so that the relaxation can settle
-        const REFRESH: usize = 20;
-        let (it, d, _) = self.relax(rules, REFRESH + 1, 50, |lg, it| {
-            if it % 5 == 0 && it <= REFRESH {
-                lg.update_windows(rules, radar);
+        let snapshot: Vec<(Vec<f64>, Vec<f64>)> =
+            self.wires.iter().map(|w| (w.xt.clone(), w.cw.clone())).collect();
+        let before = self.violation_sum(rules);
+        for strength in [1.0, 0.5, 0.25] {
+            for (w, (xt, cw)) in self.wires.iter_mut().zip(snapshot.iter()) {
+                w.xt.clone_from(xt);
+                w.cw.clone_from(cw);
             }
-        });
-        log::info!("layer {}: gaps equalised in {} sweeps (last change {:.2e})", self.layer, it, d);
+            // the slots depend on the crossing angles, which move with the tracks: refresh
+            // them a few times, then freeze them so that the relaxation can settle
+            const REFRESH: usize = 20;
+            let (it, d, _) = self.relax(rules, REFRESH + 1, 50, |lg, it| {
+                if it % 5 == 0 && it <= REFRESH {
+                    lg.update_windows(rules, radar, strength);
+                }
+            });
+            self.update_rho(rules);
+            let after = self.violation_sum(rules);
+            if after <= before + 1e-9 {
+                log::info!(
+                    "layer {}: gaps equalised at {}% in {} sweeps (last change {:.2e})",
+                    self.layer, (strength * 100.0).round(), it, d
+                );
+                return;
+            }
+        }
+        for (w, (xt, cw)) in self.wires.iter_mut().zip(snapshot.iter()) {
+            w.xt.clone_from(xt);
+            w.cw.clone_from(cw);
+        }
+        self.update_rho(rules);
+        log::info!("layer {}: gap equalisation kept off (it cost clearance)", self.layer);
+    }
+
+    /// Total clearance shortfall of the layer's chords (mm), so a finishing pass cannot
+    /// trade looks for rules.
+    fn violation_sum(&self, rules: &Rules) -> f64 {
+        let mut s = 0.0;
+        for wi in 0..self.wires.len() {
+            for k in 0..=self.wires[wi].xe.len() {
+                let a = self.wpt(&self.wires[wi], k);
+                let b = self.wpt(&self.wires[wi], k + 1);
+                s += self.chord_viol(wi, k, a, b, rules).max(0.0);
+            }
+        }
+        s
     }
 
     /// Build primitives (segments + arcs) of wire wi.
@@ -1616,6 +1659,87 @@ pub struct Geometry {
     pub warnings: Vec<String>,
 }
 
+/// Move each via off its lattice site towards the line through the terminals it joins.
+///
+/// With two neighbours every point of the segment gives the same wire length, so the
+/// closest point to the lattice site wins: that is exactly what removes the horseshoe
+/// without making the net longer. With more neighbours the median shortens it.
+fn relax_via_positions(r: &Router, pb: &Problem, rules: &Rules, used: &mut [(u32, P, NetId)]) {
+    let mut nb: Vec<Vec<P>> = vec![Vec::new(); pb.sites.len()];
+    for w in &r.st.wires {
+        if !w.alive {
+            continue;
+        }
+        let rm = &r.meshes[w.li];
+        if let Some(s) = rm.verts[w.start as usize].site {
+            nb[s as usize].push(rm.verts[w.end as usize].pos);
+        }
+        if let Some(s) = rm.verts[w.end as usize].site {
+            nb[s as usize].push(rm.verts[w.start as usize].pos);
+        }
+    }
+    let mut moved = 0;
+    for i in 0..used.len() {
+        let s = used[i].0 as usize;
+        let net = used[i].2;
+        let q0 = used[i].1;
+        let points = &nb[s];
+        if points.is_empty() {
+            continue;
+        }
+        let mut cands: Vec<P> = Vec::new();
+        if points.len() == 2 {
+            let (a, b) = (points[0], points[1]);
+            let ab = b - a;
+            let len2 = ab.dot(ab);
+            if len2 > 1e-9 {
+                let t = ((q0 - a).dot(ab) / len2).clamp(0.0, 1.0);
+                for dt in [0.0, 0.08, -0.08, 0.16, -0.16, 0.28, -0.28] {
+                    cands.push(a + ab * (t + dt).clamp(0.0, 1.0));
+                }
+            }
+        } else {
+            let mut c = P::default();
+            for q in points {
+                c = c + *q;
+            }
+            let c = c / points.len() as f64;
+            cands.push(c);
+            for (dx, dy) in [(0.3, 0.0), (-0.3, 0.0), (0.0, 0.3), (0.0, -0.3)] {
+                cands.push(c + P { x: dx, y: dy });
+            }
+        }
+        let others: Vec<(P, NetId)> = used
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j != i)
+            .map(|(_, u)| (u.1, u.2))
+            .collect();
+        let mut best: Option<(P, f64)> = None;
+        let move_cap: f64 = std::env::var("GRIDLESS_VIA_RELAX_R")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.2);
+        for q in cands {
+            let d0 = q.dist(q0);
+            if d0 > move_cap || d0 < 1e-6 || !via_spot_ok(pb, rules, q, net, &others) {
+                continue;
+            }
+            let score = points.iter().map(|p| p.dist(q)).sum::<f64>() + 0.02 * d0;
+            if best.map_or(true, |(_, s)| score < s) {
+                best = Some((q, score));
+            }
+        }
+        if let Some((q, _)) = best {
+            used[i].1 = q;
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        log::info!("{moved} via(s) moved off the lattice to straighten the wires");
+    }
+}
+
 pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
     let emb = r.embed();
     let via_r = rules.via_dia / 2.0;
@@ -1629,6 +1753,13 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
                 used[i].1 = q;
             }
         }
+    }
+    // The rubber band never moves a via: its position comes from the via lattice. When a
+    // via sits off the line between the terminals it joins, the wires bend around it (a
+    // horseshoe) instead of pulling it straight. Put each via on that line, two
+    // neighbours, or at their median for more, keeping it clear of foreign copper.
+    if std::env::var("GRIDLESS_NO_VIA_RELAX").is_err() {
+        relax_via_positions(r, pb, rules, &mut used);
     }
     // layers are independent: one thread each
     use rayon::prelude::*;

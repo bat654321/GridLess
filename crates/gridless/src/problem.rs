@@ -413,7 +413,20 @@ impl Problem {
             if pads.len() < 2 {
                 continue;
             }
+            // A pad inside a same-net pour on its own layer is joined by the pour, on
+            // outer layers as well: no track is routed between two such pads. Pads the
+            // pour does not cover keep their tracks, so a net is never left dangling.
+            let covered = |i: usize| {
+                rules.trust_pours
+                    && pour_covers(b, ni, &b.pads[i])
+                    && !rules.force_fanout.contains(&b.pad_label(i))
+            };
+            let mut left_to_pour = 0;
             for (x, y) in mst_grouped(b, rules, &pads, Some(&pad_group)) {
+                if covered(x) && covered(y) {
+                    left_to_pour += 1;
+                    continue;
+                }
                 conns.push(Conn {
                     net: ni,
                     net2: None,
@@ -429,14 +442,34 @@ impl Problem {
                     couple: None,
                 });
             }
+            if left_to_pour > 0 {
+                log::info!("net {}: {left_to_pour} connection(s) left to the pour", b.nets[ni].name);
+            }
         }
         let _ = LayerRole::Signal;
         Problem { obstacles, outline, sites, conns, route_layers, bbox, plane_nets, pad_group, escape }
     }
 }
 
+/// A pad is joined by a same-net pour when the filled copper actually reaches it:
+/// inside the fill, or within a thermal spoke of it. The zone *outline* is not enough —
+/// a pour cut by tracks may pass near a pad without touching it.
 fn pour_covers(b: &Board, net: NetId, pd: &Pad) -> bool {
-    b.zones.iter().any(|z| z.keepout.is_none() && z.net == Some(net) && pd.layers.iter().any(|l| z.layers.contains(l)) && point_in_poly(pd.pos, &z.outline))
+    b.zones.iter().any(|z| {
+        if z.keepout.is_some() || z.net != Some(net) {
+            return false;
+        }
+        z.fills.iter().any(|(l, poly)| {
+            pd.layers.contains(l)
+                && poly.len() >= 3
+                && (point_in_poly(pd.pos, poly)
+                    || poly
+                        .iter()
+                        .zip(poly.iter().cycle().skip(1))
+                        .take(poly.len())
+                        .any(|(a, c)| pd.shape.seg_dist(*a, *c) <= 0.6))
+        })
+    })
 }
 
 /// Euclidean MST over pads (Prim), with a penalty for pad pairs without a common layer.

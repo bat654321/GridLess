@@ -4,6 +4,20 @@ All notable changes to GridLess are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions use
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Gap equalisation is no longer dropped for a whole layer when it costs a rule:
+  it retries at 50 % and 25 % of the pull, so a dense cluster keeps most of the
+  centring instead of losing all of it.
+- `trust_pours` now applies to outer-layer pours as well: a pad the filled copper
+  reaches is left to the pour, with no track. The check uses the zone's filled
+  polygons, not its outline.
+- A via is moved off its lattice site onto the line between the terminals it
+  joins (the median for three or more), within 1.2 mm and clear of foreign
+  copper. This removes the horseshoe a fixed via used to force.
+
 ## [0.1.0] — 2026-11-21
 
 First public, packaged release.
