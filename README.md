@@ -15,7 +15,7 @@ concentric bundles. The result looks routed by hand rather than generated.
 ## Status
 
 GridLess is at an early testing stage. On the author's 4-layer *Carrier* board it
-matches the hand routing on correctness and uses fewer vias:
+matches the hand routing on clearance correctness and uses fewer vias:
 
 | Carrier: 4 layers, 43 parts, 281 pads, 75 nets | Hand routing | GridLess |
 |---|---|---|
