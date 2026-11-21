@@ -1,0 +1,23 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v2#/definitions/Repository",
+  "name": "GridLess",
+  "schema_version": 2,
+  "maintainer": {
+    "name": "bat654321",
+    "contact": {
+      "github": "https://github.com/bat654321/GridLess"
+    }
+  },
+  "packages": {
+    "url": "https://bat654321.github.io/GridLess/packages.json",
+    "sha256": "89e9b5b91f78a604c1bea2adf8e158d2d5df797fd5354914355e1cdc4250146b",
+    "update_timestamp": 1795266546,
+    "update_time_utc": "2026-11-21 13:09:06"
+  },
+  "resources": {
+    "url": "https://bat654321.github.io/GridLess/resources.zip",
+    "sha256": "a7621a26daf047e2dd94e720601ed2570f855c247563932ab4a635777a248b98",
+    "update_timestamp": 1795266546,
+    "update_time_utc": "2026-11-21 13:09:06"
+  }
+}

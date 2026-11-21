@@ -1,0 +1,54 @@
+{
+  "packages": [
+    {
+      "$schema": "https://go.kicad.org/pcm/schemas/v2",
+      "name": "GridLess",
+      "description": "Gridless topological autorouter for KiCad 10: any-angle tracks with arcs, differential pairs, length matching and DRC feedback.",
+      "description_full": "GridLess is a gridless, topological autorouter for KiCad 10, in the spirit of TopoR.\nIt first decides which side of which obstacle every track passes, then draws any-angle\ntracks with arcs around pads, concentric bundles, differential pairs and length matching.\n\nFeatures:\n- any-angle tracks and arcs, no 45-degree grid\n- differential pairs kept coupled, with skew compensated through intermediate components\n- length matching with meanders, and room for them reserved already in the topology\n- preferred layer directions, via minimisation, automatic track necking\n- planes and split planes; optional zone check through kicad-cli plus plane vias\n- a feedback loop driven by KiCad's DRC and by the router's own clearance check\n- the plugin interface is translated into all 44 languages shipped with KiCad 10\n- a command-line tool plus two KiCad plugins (IPC API and the classic SWIG API)\n\nStatus: early testing.  On the author's 4-layer reference board it matches the hand\nrouting with zero clearance errors and fewer vias; dense boards (0.4 mm QFN, RF\nsections) are still an open problem.  Tested with KiCad 10.0 on Windows; Linux and\nmacOS binaries can be included in the same archive but are tested less.  Save your\nboard and keep a backup: this is an autorouter, not a guarantee.\n\nThe IPC plugin needs Preferences > Plugins > \"Enable KiCad API\".  The classic\nplugin, which routes the saved board file and needs no API server, is included in\nthe source repository's installer.\n\nThe dialogs use wxWidgets, which KiCad's bundled Python provides on Windows and\nmacOS.  On Linux the external Python may not have it; the plugin then routes with\ndefault options and prints the report (install wxPython for the dialogs).\n",
+      "identifier": "com.github.bat654321.gridless",
+      "type": "plugin",
+      "author": {
+        "name": "bat654321",
+        "contact": {
+          "github": "https://github.com/bat654321/GridLess"
+        }
+      },
+      "maintainer": {
+        "name": "bat654321",
+        "contact": {
+          "github": "https://github.com/bat654321/GridLess"
+        }
+      },
+      "license": "MIT",
+      "resources": {
+        "homepage": "https://github.com/bat654321/GridLess",
+        "repository": "https://github.com/bat654321/GridLess",
+        "documentation": "https://github.com/bat654321/GridLess#readme"
+      },
+      "tags": [
+        "autorouter",
+        "routing",
+        "pcb",
+        "differential-pairs",
+        "length-matching"
+      ],
+      "versions": [
+        {
+          "version": "0.1.0",
+          "status": "testing",
+          "kicad_version": "10.0",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "runtime": "ipc",
+          "download_url": "https://github.com/bat654321/GridLess/releases/download/v0.1.0/gridless-0.1.0-pcm.zip",
+          "download_sha256": "115afd73fe3a2a67959423bd0c65785f7f13ba1d4b5577839817230585104635",
+          "download_size": 14531872,
+          "install_size": 52673607
+        }
+      ]
+    }
+  ]
+}
