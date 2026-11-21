@@ -79,6 +79,27 @@ enum Cmd {
         #[arg(long)]
         kicad_check: bool,
     },
+    /// Join the islands of a net's copper pours with vias
+    Stitch {
+        board: PathBuf,
+        /// output .kicad_pcb (default: <board>_stitched.kicad_pcb)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// router config (TOML); default: <board>.gridless.toml if present
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// KiCad project file with net classes (default: <board>.kicad_pro)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// only this net (default: every net with a pour)
+        #[arg(long)]
+        net: Option<String>,
+        /// do not refill the pours with kicad-cli first; use the fills saved in the board
+        #[arg(long)]
+        no_refill: bool,
+        #[arg(long, default_value_t = 200)]
+        max_vias: usize,
+    },
 }
 
 fn load_config(board: &Path, cfg: &Option<PathBuf>) -> Result<Config> {
@@ -184,6 +205,67 @@ fn main() -> Result<()> {
                 }
             }
             cv.save(&png)?;
+        }
+        Cmd::Stitch { board, output, config, project, net, no_refill, max_vias } => {
+            let out = output.unwrap_or_else(|| {
+                let stem = board.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+                board.with_file_name(format!("{stem}_stitched.kicad_pcb"))
+            });
+            let mut analysis_path = board.clone();
+            let mut temp_dir: Option<PathBuf> = None;
+            if !no_refill {
+                match gridless::pipeline::find_kicad_cli() {
+                    None => log::warn!("stitch: kicad-cli not found (set KICAD_CLI); using the fills saved in the board"),
+                    Some(cli) => {
+                        let dir = std::env::temp_dir().join(format!("gridless_stitch_{}", std::process::id()));
+                        std::fs::create_dir_all(&dir)?;
+                        let pcb = dir.join("stitch.kicad_pcb");
+                        std::fs::copy(&board, &pcb)?;
+                        let pro = project.clone().unwrap_or_else(|| board.with_extension("kicad_pro"));
+                        if pro.exists() {
+                            let _ = std::fs::copy(&pro, dir.join("stitch.kicad_pro"));
+                        }
+                        let report = dir.join("drc.json");
+                        let st = std::process::Command::new(cli)
+                            .args(["pcb", "drc", "--format", "json", "--units", "mm", "--refill-zones", "--save-board", "-o"])
+                            .arg(&report)
+                            .arg(&pcb)
+                            .output()?;
+                        if pcb.is_file() {
+                            analysis_path = pcb.clone();
+                            temp_dir = Some(dir);
+                        } else {
+                            log::warn!("stitch: refill failed: {}", String::from_utf8_lossy(&st.stderr));
+                        }
+                    }
+                }
+            }
+            let l = gridless::kicad::load_with_project(&analysis_path, project.as_deref())?;
+            let cfg = load_config(&board, &config)?;
+            let rules = Rules::resolve(&l.board, &cfg);
+            let (vias, rep) = gridless::stitch::stitch(&l.board, &rules, net.as_deref(), max_vias);
+            let items: Vec<gridless::kicad::OutItem> = vias
+                .iter()
+                .map(|(q, n)| gridless::kicad::OutItem::Via {
+                    net: l.board.nets[*n].name.clone(),
+                    pos: *q,
+                    dia: rules.via_dia,
+                    drill: rules.via_drill,
+                })
+                .collect();
+            let src = std::fs::read_to_string(&board)?;
+            gridless::kicad::write_routed(&src, &out, &items, false)?;
+            log::info!(
+                "stitch: {} islands, {} net(s), {} via(s) added, {} unresolved -> {}",
+                rep.islands,
+                rep.nets,
+                rep.added,
+                rep.unresolved,
+                out.display()
+            );
+            if let Some(d) = temp_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
         }
         Cmd::Route { board, output, config, png, view, scale, rounds, json_out, project, keep_existing, kicad_check } => {
             let t0 = Instant::now();

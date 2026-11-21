@@ -8,6 +8,13 @@ All notable changes to GridLess are recorded here. The format follows
 
 ### Added
 
+- `gridless stitch <board>`: join the copper islands of a net's pours with vias.
+  It refills the zones through `kicad-cli` first (so the islands are the ones the
+  router actually leaves), builds the island graph from pads, tracks and vias,
+  and connects every component to the largest one with a via where two layers'
+  islands overlap. `--net GND` limits it to one net, `--no-refill` uses the saved
+  fills. This is the step that closes unconnected ground islands on boards where
+  signal routing cut the pour.
 - Zones nested in footprints (Altium component keepouts, thermal pours) are read now.
   Their coordinates are absolute; keepout flags are kept per kind, so a keepout that
   only blocks pours does not block tracks. The router used to cross XT1's keepout.
