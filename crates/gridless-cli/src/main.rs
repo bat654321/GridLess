@@ -213,6 +213,7 @@ fn main() -> Result<()> {
             });
             let mut analysis_path = board.clone();
             let mut temp_dir: Option<PathBuf> = None;
+            let mut orphan_spots: Vec<(String, gridless::geom::P)> = Vec::new();
             if !no_refill {
                 match gridless::pipeline::find_kicad_cli() {
                     None => log::warn!("stitch: kicad-cli not found (set KICAD_CLI); using the fills saved in the board"),
@@ -234,6 +235,11 @@ fn main() -> Result<()> {
                         if pcb.is_file() {
                             analysis_path = pcb.clone();
                             temp_dir = Some(dir);
+                            // which pads KiCad itself calls unconnected on the refilled board
+                            orphan_spots = gridless::pipeline::kicad_unconnected_spots(&report);
+                            if !orphan_spots.is_empty() {
+                                log::info!("stitch: KiCad reports {} unconnected spot(s)", orphan_spots.len());
+                            }
                         } else {
                             log::warn!("stitch: refill failed: {}", String::from_utf8_lossy(&st.stderr));
                         }
@@ -243,8 +249,12 @@ fn main() -> Result<()> {
             let l = gridless::kicad::load_with_project(&analysis_path, project.as_deref())?;
             let cfg = load_config(&board, &config)?;
             let rules = Rules::resolve(&l.board, &cfg);
-            let (vias, rep) = gridless::stitch::stitch(&l.board, &rules, net.as_deref(), max_vias);
-            let items: Vec<gridless::kicad::OutItem> = vias
+            let orphans: Vec<(gridless::board::NetId, gridless::geom::P)> = orphan_spots
+                .iter()
+                .filter_map(|(n, q)| l.board.nets.iter().position(|x| &x.name == n).map(|i| (i, *q)))
+                .collect();
+            let (vias, stubs, rep) = gridless::stitch::stitch(&l.board, &rules, net.as_deref(), max_vias, &orphans);
+            let mut items: Vec<gridless::kicad::OutItem> = vias
                 .iter()
                 .map(|(q, n)| gridless::kicad::OutItem::Via {
                     net: l.board.nets[*n].name.clone(),
@@ -253,13 +263,22 @@ fn main() -> Result<()> {
                     drill: rules.via_drill,
                 })
                 .collect();
+            // pad-to-pour bridges drawn as tracks where the thermal barrier blocks the pour
+            items.extend(stubs.iter().map(|s| gridless::kicad::OutItem::Seg {
+                layer: l.board.layers[s.layer].name.clone(),
+                net: l.board.nets[s.net].name.clone(),
+                width: s.width,
+                a: s.a,
+                b: s.b,
+            }));
             let src = std::fs::read_to_string(&board)?;
             gridless::kicad::write_routed(&src, &out, &items, false)?;
             log::info!(
-                "stitch: {} islands, {} net(s), {} via(s) added, {} unresolved -> {}",
+                "stitch: {} islands, {} net(s), {} via(s) and {} track(s) added, {} unresolved -> {}",
                 rep.islands,
                 rep.nets,
                 rep.added,
+                rep.tracks,
                 rep.unresolved,
                 out.display()
             );

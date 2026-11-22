@@ -216,6 +216,68 @@ fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progres
             geo.tracks = tight_tracks;
         }
     }
+    // 45 degree preference: snap the finished tracks to the 0/45/90 grid. A hand-routed
+    // board looks like this. A blanket snap costs too many rules, so tracks that end up
+    // in a violation are put back one by one until the snap is free.
+    if rules.angle45 > 0.0 {
+        let base = drc.violations.len();
+        let originals: Vec<Vec<crate::geometry::Prim>> = geo.tracks.iter().map(|t| t.prims.clone()).collect();
+        let orig_pw: Vec<Vec<f64>> = geo.tracks.iter().map(|t| t.pw.clone()).collect();
+        let mut snapped = vec![false; geo.tracks.len()];
+        for i in 0..geo.tracks.len() {
+            let cn = &pb.conns[geo.tracks[i].conn as usize];
+            if cn.couple.is_some() || matches!(cn.kind, crate::problem::ConnKind::Pair { .. }) {
+                continue;
+            }
+            let prims = std::mem::take(&mut geo.tracks[i].prims);
+            let pw = std::mem::take(&mut geo.tracks[i].pw);
+            let (np, nw) = crate::geometry::snap45_w(prims, pw);
+            geo.tracks[i].prims = np;
+            geo.tracks[i].pw = nw;
+            snapped[i] = true;
+        }
+        let mut rep = drc::check(board, pb, rules, &geo);
+        for _ in 0..8 {
+            if rep.violations.len() <= base {
+                break;
+            }
+            let mut revert = vec![false; geo.tracks.len()];
+            for v in &rep.violations {
+                if let Some((ti, _)) = v.track {
+                    revert[ti] = true;
+                }
+                if let Some((ti, _)) = v.track2 {
+                    revert[ti] = true;
+                }
+            }
+            let mut any = false;
+            for i in 0..geo.tracks.len() {
+                if revert[i] && snapped[i] {
+                    geo.tracks[i].prims = originals[i].clone();
+                    geo.tracks[i].pw = orig_pw[i].clone();
+                    snapped[i] = false;
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+            rep = drc::check(board, pb, rules, &geo);
+        }
+        if rep.violations.len() <= base {
+            let kept = snapped.iter().filter(|&&s| s).count();
+            progress(&format!("45 degree snap: {kept} track(s) on the grid, {} violations", rep.violations.len()));
+            drc = rep;
+        } else {
+            for i in 0..geo.tracks.len() {
+                if snapped[i] {
+                    geo.tracks[i].prims = originals[i].clone();
+                    geo.tracks[i].pw = orig_pw[i].clone();
+                }
+            }
+            progress(&format!("45 degree snap dropped: {} violations instead of {}", rep.violations.len(), base));
+        }
+    }
     // length matching on the final geometry
     let tuning = if !rules.length_groups.is_empty() || !rules.diff_pairs.is_empty() {
         let t = crate::tuning::tune(board, pb, rules, &mut geo);
@@ -257,6 +319,36 @@ pub fn find_kicad_cli() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Pads KiCad's DRC reports as unconnected, read from a DRC JSON report:
+/// (net name, pad position). Items that are not pads (zones, tracks) are returned
+/// too; the stitcher matches only the positions that hit a pad.
+pub fn kicad_unconnected_spots(report: &std::path::Path) -> Vec<(String, crate::geom::P)> {
+    let Ok(txt) = std::fs::read_to_string(report) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for u in v["unconnected_items"].as_array().cloned().unwrap_or_default() {
+        for it in u["items"].as_array().cloned().unwrap_or_default() {
+            let d = it["description"].as_str().unwrap_or("");
+            let (Some(a), Some(b)) = (d.find('['), d.find(']')) else {
+                continue;
+            };
+            if b <= a + 1 {
+                continue;
+            }
+            let x = it["pos"]["x"].as_f64().unwrap_or(f64::NAN);
+            let y = it["pos"]["y"].as_f64().unwrap_or(f64::NAN);
+            if x.is_finite() && y.is_finite() {
+                out.push((d[a + 1..b].to_string(), crate::geom::p(x, y)));
+            }
+        }
+    }
+    out
 }
 
 /// Run KiCad's DRC (with zone refill) on a routed board and return the pads of plane

@@ -152,6 +152,12 @@ pub struct Config {
     /// room (mm) around a pad the pour has to reach, where signal routing pays an
     /// extra cost so it cannot cut the pour away from the pad (0 = off)
     pub pour_keepout: Option<f64>,
+    /// prefer 0/45/90 degree track directions: 0 = off, 1 = snap the finished
+    /// geometry to the 45 degree grid (a hand-routed board looks like this)
+    pub angle45: Option<f64>,
+    /// extra cost for walking the mesh at an angle off the 0/45/90 grid (0 = off,
+    /// 0.2-0.4 is a gentle preference; large values fight the A* heuristic)
+    pub angle_cost: Option<f64>,
     /// router effort: number of negotiation iterations
     pub iterations: Option<usize>,
     pub seed: Option<u64>,
@@ -238,6 +244,8 @@ pub struct Rules {
     pub keep_existing: bool,
     pub trust_pours: bool,
     pub pour_keepout: f64,
+    pub angle45: f64,
+    pub angle_cost: f64,
     pub force_fanout: Vec<String>,
     pub iterations: usize,
     pub seed: u64,
@@ -402,6 +410,8 @@ impl Rules {
             keep_existing: cfg.keep_existing.unwrap_or(false),
             trust_pours: cfg.trust_pours.unwrap_or(true),
             pour_keepout: cfg.pour_keepout.unwrap_or(0.0),
+            angle45: cfg.angle45.unwrap_or(0.0),
+            angle_cost: cfg.angle_cost.unwrap_or(0.0),
             force_fanout: cfg.force_fanout.clone(),
             iterations: cfg.iterations.unwrap_or(40),
             seed: cfg.seed.unwrap_or(1),

@@ -1386,7 +1386,13 @@ pub fn simplify_prims(raw: Vec<Prim>) -> Vec<Prim> {
                 (Prim::Seg(a, b), Prim::Seg(_, c)) => {
                     let d1 = (b - a).norm();
                     let d2 = (c - b).norm();
-                    if d1.cross(d2).abs() < 1e-7 && d1.dot(d2) > 0.0 {
+                    // The mesh splits a straight run at every triangle it crosses, so a
+                    // run of collinear prims must merge when the middle vertex lies on
+                    // the chord within a small tolerance. Testing the sine of the angle
+                    // alone (1e-7) leaves the run split and the track looks jagged.
+                    let ac = c - a;
+                    let dev = if ac.len() > 1e-9 { (b - a).cross(ac).abs() / ac.len() } else { 0.0 };
+                    if d1.dot(d2) > 0.0 && dev < 0.01 {
                         *last = Prim::Seg(a, c);
                         continue;
                     }
@@ -1403,6 +1409,61 @@ pub fn simplify_prims(raw: Vec<Prim>) -> Vec<Prim> {
         out.push(pr);
     }
     out
+}
+
+/// Snap a polyline to the 45 degree grid: a segment that is not a multiple of 45
+/// degrees becomes a 45 degree stub plus a straight one, between the same endpoints.
+/// Hand routing is drawn this way; arbitrary angles are what makes a router's board
+/// look alien. Arcs are left alone.
+pub fn snap45(prims: Vec<Prim>) -> Vec<Prim> {
+    let mut out: Vec<Prim> = Vec::with_capacity(prims.len());
+    for pr in prims {
+        let (a, b) = match pr {
+            Prim::Seg(a, b) => (a, b),
+            Prim::Arc(_) => {
+                out.push(pr);
+                continue;
+            }
+        };
+        let d = b - a;
+        let l = d.len();
+        if l < 1e-6 {
+            out.push(Prim::Seg(a, b));
+            continue;
+        }
+        let mut ang = d.y.atan2(d.x).to_degrees() % 45.0;
+        if ang < 0.0 {
+            ang += 45.0;
+        }
+        let dev = ang.min(45.0 - ang);
+        if dev <= 2.0 {
+            out.push(Prim::Seg(a, b));
+            continue;
+        }
+        // the diagonal leg takes the shorter side, the straight leg the rest
+        let m = if d.x.abs() >= d.y.abs() {
+            p(a.x + d.y.abs() * d.x.signum(), a.y + d.y)
+        } else {
+            p(a.x + d.x, a.y + d.x.abs() * d.y.signum())
+        };
+        out.push(Prim::Seg(a, m));
+        out.push(Prim::Seg(m, b));
+    }
+    out
+}
+
+/// `snap45` keeping the per-primitive widths aligned with the new primitives.
+pub fn snap45_w(prims: Vec<Prim>, pw: Vec<f64>) -> (Vec<Prim>, Vec<f64>) {
+    let mut out: Vec<Prim> = Vec::with_capacity(prims.len());
+    let mut ow: Vec<f64> = Vec::with_capacity(pw.len());
+    for (pr, w) in prims.into_iter().zip(pw) {
+        let n = out.len();
+        out.extend(snap45(vec![pr]));
+        for _ in n..out.len() {
+            ow.push(w);
+        }
+    }
+    (out, ow)
 }
 
 /// Walk a polyline from vertex sv to vertex ev through the mesh, returning crossed edges,

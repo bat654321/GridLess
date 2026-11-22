@@ -621,7 +621,14 @@ impl<'a> Router<'a> {
             Direction::Horizontal => d.y.abs() / l,
             Direction::Vertical => d.x.abs() / l,
         };
-        lr.cost * (1.0 + lr.dir_weight * off)
+        // gentle preference for 0/45/90 degree paths: the heuristic stays the plain
+        // distance, so a cost >= distance keeps A* admissible
+        let mut dev = d.y.atan2(d.x).to_degrees() % 45.0;
+        if dev < 0.0 {
+            dev += 45.0;
+        }
+        let dev45 = dev.min(45.0 - dev) / 22.5;
+        lr.cost * (1.0 + lr.dir_weight * off + self.rules.angle_cost * dev45)
     }
 
     fn wire_cost(&self, w: u32) -> f64 {
