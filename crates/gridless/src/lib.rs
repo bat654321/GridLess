@@ -3,6 +3,7 @@
 pub mod board;
 pub mod config;
 pub mod drc;
+pub mod field;
 pub mod geom;
 pub mod geometry;
 pub mod kicad;

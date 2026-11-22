@@ -136,6 +136,8 @@ pub struct LayerGeom {
     /// along the edge (filled in for centring)
     pub walls: Vec<Option<[f64; 2]>>,
     pub rules: Rules,
+    /// distance field to copper, built when ridge centring is on
+    pub field: Option<crate::field::Field>,
 }
 
 /// Straight pieces of a chord a->b that wraps (c, rho) (tangent segments only).
@@ -649,6 +651,50 @@ impl LayerGeom {
         for (wi, k, x) in out {
             self.wires[wi as usize].win[k as usize] = Some(x);
         }
+        // Ridge windows: where the radar has no slot (one wall, a board edge, a wide
+        // corridor), put the crossing on the maximum of the distance field - the
+        // medial axis of the free space. Soft: `feasible` clips it to the rules.
+        if let Some(field) = &self.field {
+            let mut ridge: Vec<(u32, u32, (f64, f64))> = Vec::new();
+            for e in 0..self.edge_x.len() {
+                let list = &self.edge_x[e];
+                if list.len() != 1 {
+                    // a shared edge needs the water filling of the radar, not one ridge
+                    continue;
+                }
+                let ed = &self.mesh.edges[e];
+                let lo = ed.exit[0].min(ed.len);
+                let hi = (ed.len - ed.exit[1]).max(lo);
+                if hi - lo < 0.25 {
+                    continue;
+                }
+                let mut best_t = 0.5 * (lo + hi);
+                let mut best_d = -1.0;
+                for i in 0..=10 {
+                    let t = lo + (hi - lo) * i as f64 / 10.0;
+                    let d = field.at(self.edge_pt(e as u32, t));
+                    if d > best_d {
+                        best_d = d;
+                        best_t = t;
+                    }
+                }
+                for &(wi, k) in list {
+                    let w = &self.wires[wi as usize];
+                    if w.win[k as usize].is_some() {
+                        continue;
+                    }
+                    let dc = field.at(self.wpt(w, k as usize + 1));
+                    if best_d < dc + 0.05 {
+                        continue;
+                    }
+                    let half = (0.08 * (hi - lo)).clamp(0.02, 0.15);
+                    ridge.push((wi, k, (best_t - half, best_t + half)));
+                }
+            }
+            for (wi, k, x) in ridge {
+                self.wires[wi as usize].win[k as usize] = Some(x);
+            }
+        }
         // a wire that bends around a pad crosses a fan of edges at it; it keeps from the pad
         // the distance of the narrowest gap of the fan (one arc), not the middle of every
         // edge (the middle of a pin cell's diagonal lies further out and would add kinks)
@@ -774,7 +820,20 @@ impl LayerGeom {
                 let e = w.xe[k];
                 let prev = self.wpt(w, k);
                 let next = self.wpt(w, k + 2);
-                let f = |t: f64| self.chord_len(w, k, prev, self.edge_pt(e, t)) + self.chord_len(w, k + 1, self.edge_pt(e, t), next);
+                // soft pull to the middle of the legal interval: the gap between the
+                // neighbouring crossings (wire-aware, unlike the static distance field)
+                let mid = 0.5 * (lo + hi);
+                let span = (hi - lo).max(1e-9);
+                let gap_pull = rules.center_gap * if w.win[k].is_some() { 0.0 } else { 0.15 * span };
+                let f = |t: f64| {
+                    let mut v = self.chord_len(w, k, prev, self.edge_pt(e, t))
+                        + self.chord_len(w, k + 1, self.edge_pt(e, t), next);
+                    if gap_pull > 0.0 {
+                        let u = (t - mid) / span;
+                        v += gap_pull * u * u;
+                    }
+                    v
+                };
                 let viol = |t: f64| {
                     let x = self.edge_pt(e, t);
                     self.chord_viol(wi, k, prev, x, rules).max(self.chord_viol(wi, k + 1, x, next, rules))
@@ -1846,6 +1905,11 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
             }
         }
         let (tri_obs, tri_out) = near_lists(&mesh, &pb.outline, rules);
+        let field = if rules.ridge > 0.0 {
+            Some(crate::field::Field::from_mesh(&mesh, rules.ridge_step))
+        } else {
+            None
+        };
         let mut lg = LayerGeom {
             layer,
             edge_x: vec![Vec::new(); mesh.edges.len()],
@@ -1858,6 +1922,7 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
             tri_out,
             walls: Vec::new(),
             rules: rules.clone(),
+            field,
         };
         let map_v = |v: u32| -> Option<u32> {
             let mv = &rm.verts[v as usize];

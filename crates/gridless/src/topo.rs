@@ -15,6 +15,8 @@ use crate::problem::{ConnKind, Problem, Term};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
+use crate::field::Field;
+
 /// Extra room reserved per wire when checking edge capacity, so that the geometry
 /// (which keeps its own small safety margin) never has to squeeze through a zero-slack gap.
 const CAP_MARGIN: f64 = 0.012;
@@ -95,6 +97,8 @@ pub struct Router<'a> {
     /// the same for mesh vertices
     pour_v: Vec<Vec<f32>>,
     rip_base: f64,
+    /// distance field to copper per layer (empty when the ridge pull is off)
+    field: Vec<Field>,
 }
 
 /// How many millimetres of ordinary track one millimetre through a pour pad's escape
@@ -204,8 +208,13 @@ impl<'a> Router<'a> {
             })
             .collect();
         let pour_v = meshes.iter().map(|m| m.verts.iter().map(|v| pour_penalty(&pb.pour_pads, v.pos)).collect()).collect();
+        let field: Vec<Field> = if rules.ridge > 0.0 || rules.ridge_cost > 0.0 {
+            meshes.iter().map(|m| Field::from_mesh(m, rules.ridge_step)).collect()
+        } else {
+            Vec::new()
+        };
         let st = State { wires: Vec::new(), free_wires: Vec::new(), conns: vec![ConnState::default(); pb.conns.len()], layers, site_use: vec![None; pb.sites.len()] };
-        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v }
+        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v, field }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -631,6 +640,16 @@ impl<'a> Router<'a> {
         lr.cost * (1.0 + lr.dir_weight * off + self.rules.angle_cost * dev45)
     }
 
+    /// Cost factor for being close to copper: 0 on the ridge of the free space,
+    /// `ridge` right against a boundary. The path drifts to the middle of a corridor.
+    fn ridge_fac(&self, li: usize, q: P) -> f64 {
+        if self.rules.ridge_cost <= 0.0 || self.field.is_empty() {
+            return 0.0;
+        }
+        let d = self.field[li].at(q);
+        self.rules.ridge_cost * (1.0 - (d / self.rules.ridge_range.max(1e-6)).clamp(0.0, 1.0))
+    }
+
     fn wire_cost(&self, w: u32) -> f64 {
         let c = self.st.wires[w as usize].conn as usize;
         let r = self.st.conns[c].ripups as f64;
@@ -1053,7 +1072,9 @@ impl<'a> Router<'a> {
                                 self.crossings(li, t, pa, pb, c, &mut crossed);
                                 let (lo, hi, over, xw, neck) = self.fit_gap(li, eo, g, width, wmin, clr, c);
                                 let q = self.best_point(li, eo, lo, hi, nd.pos, goal_near(li, nd.pos));
-                                let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * attract(li, eo, g) * lay_k(li);
+                                let step = nd.pos.dist(q);
+                                let mut cost = step * self.dir_factor(li, nd.pos, q) * attract(li, eo, g) * lay_k(li);
+                                cost += step * self.ridge_fac(li, q);
                                 cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                                 cost += over * 60.0 * self.pres_fac + neck * 15.0 + self.hist[li][eo as usize] as f64 * hist_k;
                                 cost += POUR_COST * self.pour_e[li][eo as usize] as f64 * nd.pos.dist(q);
@@ -1070,7 +1091,9 @@ impl<'a> Router<'a> {
                             }
                             self.crossings(li, t, pa, cj as f64, c, &mut crossed);
                             let q = m.verts[u as usize].pos;
-                            let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * lay_k(li);
+                            let step = nd.pos.dist(q);
+                            let mut cost = step * self.dir_factor(li, nd.pos, q) * lay_k(li);
+                            cost += step * self.ridge_fac(li, q);
                             cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                             cost += end_pen.get(&(li, u)).copied().unwrap_or(0.0);
                             cost += POUR_COST * self.pour_v[li][u as usize] as f64 * nd.pos.dist(q);

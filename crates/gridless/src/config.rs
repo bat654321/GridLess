@@ -158,6 +158,18 @@ pub struct Config {
     /// extra cost for walking the mesh at an angle off the 0/45/90 grid (0 = off,
     /// 0.2-0.4 is a gentle preference; large values fight the A* heuristic)
     pub angle_cost: Option<f64>,
+    /// centre tracks on the ridge of the distance field (0 = off, 1 = on)
+    pub ridge: Option<f64>,
+    /// A* cost factor for hugging copper (0 = off; the static field does not know
+    /// the other wires yet, so this tends to congest the corridors)
+    pub ridge_cost: Option<f64>,
+    /// soft pull of a crossing to the middle of its legal interval (0 = off,
+    /// 1 = noticeable): the free gap between neighbours, wire-aware by construction
+    pub center_gap: Option<f64>,
+    /// distance from copper (mm) at which the ridge pull has faded out
+    pub ridge_range: Option<f64>,
+    /// grid step (mm) of the distance field
+    pub ridge_step: Option<f64>,
     /// router effort: number of negotiation iterations
     pub iterations: Option<usize>,
     pub seed: Option<u64>,
@@ -246,6 +258,11 @@ pub struct Rules {
     pub pour_keepout: f64,
     pub angle45: f64,
     pub angle_cost: f64,
+    pub ridge: f64,
+    pub ridge_cost: f64,
+    pub center_gap: f64,
+    pub ridge_range: f64,
+    pub ridge_step: f64,
     pub force_fanout: Vec<String>,
     pub iterations: usize,
     pub seed: u64,
@@ -412,6 +429,11 @@ impl Rules {
             pour_keepout: cfg.pour_keepout.unwrap_or(0.0),
             angle45: cfg.angle45.unwrap_or(0.0),
             angle_cost: cfg.angle_cost.unwrap_or(0.0),
+            ridge: cfg.ridge.unwrap_or(0.0),
+            ridge_cost: cfg.ridge_cost.unwrap_or(0.0),
+            center_gap: cfg.center_gap.unwrap_or(0.0),
+            ridge_range: cfg.ridge_range.unwrap_or(1.2),
+            ridge_step: cfg.ridge_step.unwrap_or(0.25),
             force_fanout: cfg.force_fanout.clone(),
             iterations: cfg.iterations.unwrap_or(40),
             seed: cfg.seed.unwrap_or(1),
