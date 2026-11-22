@@ -66,6 +66,10 @@ pub struct Conn {
     pub kind: ConnKind,
     pub priority: i32,
     pub est_len: f64,
+    /// effective cost of the link: straight distance plus the via it needs when the
+    /// two pads share no signal layer. Routing order uses it, so a short same-layer
+    /// link goes first and a short SMD-to-SMD link across layers does not.
+    pub est_cost: f64,
     /// differential pair member: (pair index, is the P/leader net)
     pub couple: Option<(usize, bool)>,
 }
@@ -409,7 +413,7 @@ impl Problem {
                     if rules.trust_pours && pour_covers(b, ni, pd) && !rules.force_fanout.contains(&b.pad_label(pi)) {
                         continue;
                     }
-                    conns.push(Conn { net: ni, net2: None, a: Term::Pad(pi), b: Term::AnySite, a2: None, b2: None, width: nr.width, clearance: nr.clearance, kind: ConnKind::Fanout, priority: nr.priority + 1, est_len: 0.5, couple: None });
+                    conns.push(Conn { net: ni, net2: None, a: Term::Pad(pi), b: Term::AnySite, a2: None, b2: None, width: nr.width, clearance: nr.clearance, kind: ConnKind::Fanout, priority: nr.priority + 1, est_len: 0.5, est_cost: 0.5, couple: None });
                 }
                 continue;
             }
@@ -425,7 +429,7 @@ impl Problem {
                     && !rules.force_fanout.contains(&b.pad_label(i))
             };
             let mut left_to_pour = 0;
-            for (x, y) in mst_grouped(b, rules, &pads, Some(&pad_group)) {
+            for (x, y, cost) in mst_grouped(b, rules, &pads, Some(&pad_group)) {
                 if covered(x) && covered(y) {
                     left_to_pour += 1;
                     continue;
@@ -442,6 +446,7 @@ impl Problem {
                     kind: ConnKind::Signal,
                     priority: nr.priority,
                     est_len: b.pads[x].pos.dist(b.pads[y].pos),
+                    est_cost: cost,
                     couple: None,
                 });
             }
@@ -492,11 +497,14 @@ fn pour_covers(b: &Board, net: NetId, pd: &Pad) -> bool {
 }
 
 /// Euclidean MST over pads (Prim), with a penalty for pad pairs without a common layer.
-fn mst(b: &Board, rules: &Rules, pads: &[usize]) -> Vec<(usize, usize)> {
+fn mst(b: &Board, rules: &Rules, pads: &[usize]) -> Vec<(usize, usize, f64)> {
     mst_grouped(b, rules, pads, None)
 }
 
-fn mst_grouped(b: &Board, rules: &Rules, pads: &[usize], group: Option<&[usize]>) -> Vec<(usize, usize)> {
+/// Minimum spanning tree of the pads. Each edge carries its effective cost: distance,
+/// plus `via_cost` when the two pads share no signal layer (a new via is inevitable).
+/// Two through-hole pads always share a layer, so their layer change is free.
+fn mst_grouped(b: &Board, rules: &Rules, pads: &[usize], group: Option<&[usize]>) -> Vec<(usize, usize, f64)> {
     let n = pads.len();
     let same = |i: usize, j: usize| group.map_or(false, |g| g[pads[i]] == g[pads[j]]);
     let cost = |i: usize, j: usize| {
@@ -529,7 +537,7 @@ fn mst_grouped(b: &Board, rules: &Rules, pads: &[usize], group: Option<&[usize]>
         }
         in_tree[k] = true;
         if !same(best[k].1, k) {
-            edges.push((pads[best[k].1], pads[k]));
+            edges.push((pads[best[k].1], pads[k], best[k].0));
         }
         for j in 0..n {
             if !in_tree[j] {
@@ -540,7 +548,40 @@ fn mst_grouped(b: &Board, rules: &Rules, pads: &[usize], group: Option<&[usize]>
             }
         }
     }
-    edges
+    // A long edge that passes close to another pad of the net should break at that
+    // pad: the router then joins the near pad first instead of dragging a track past
+    // it to a farther one.
+    let idx_of = |pad: usize| pads.iter().position(|&x| x == pad).unwrap();
+    let mut split: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
+    for &(a, c, ec) in &edges {
+        let (ia, ic) = (idx_of(a), idx_of(c));
+        let (pa, pc) = (b.pads[a].pos, b.pads[c].pos);
+        let base = pa.dist(pc);
+        let mut pick: Option<(usize, f64)> = None;
+        if base > 1.0 {
+            for &p in pads {
+                if p == a || p == c {
+                    continue;
+                }
+                let pp = b.pads[p].pos;
+                if point_seg_dist(pp, pa, pc) < 0.8 {
+                    let extra = pa.dist(pp) + pp.dist(pc) - base;
+                    if extra < 0.35 * base && pick.map_or(true, |(_, e)| extra < e) {
+                        pick = Some((p, extra));
+                    }
+                }
+            }
+        }
+        match pick {
+            Some((p, _)) => {
+                let ip = idx_of(p);
+                split.push((a, p, cost(ia, ip)));
+                split.push((p, c, cost(ip, ic)));
+            }
+            None => split.push((a, c, ec)),
+        }
+    }
+    split
 }
 
 /// Differential pair: both nets are routed single-ended along their own MST; the N
@@ -552,7 +593,7 @@ fn plan_pair(b: &Board, rules: &Rules, pi: usize, conns: &mut Vec<Conn>) {
         if pads.len() < 2 {
             continue;
         }
-        for (x, y) in mst(b, rules, &pads) {
+        for (x, y, cost) in mst(b, rules, &pads) {
             conns.push(Conn {
                 net,
                 net2: None,
@@ -565,6 +606,7 @@ fn plan_pair(b: &Board, rules: &Rules, pi: usize, conns: &mut Vec<Conn>) {
                 kind: ConnKind::Signal,
                 priority: rules.nets[net].priority + if leader { 12 } else { 11 },
                 est_len: b.pads[x].pos.dist(b.pads[y].pos),
+                est_cost: cost,
                 couple: Some((pi, leader)),
             });
         }

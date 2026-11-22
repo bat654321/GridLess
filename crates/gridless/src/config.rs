@@ -166,6 +166,8 @@ pub struct Config {
     /// soft pull of a crossing to the middle of its legal interval (0 = off,
     /// 1 = noticeable): the free gap between neighbours, wire-aware by construction
     pub center_gap: Option<f64>,
+    /// a link at or below this effective cost (mm, via included) is routed first
+    pub short_link: Option<f64>,
     /// distance from copper (mm) at which the ridge pull has faded out
     pub ridge_range: Option<f64>,
     /// grid step (mm) of the distance field
@@ -261,6 +263,7 @@ pub struct Rules {
     pub ridge: f64,
     pub ridge_cost: f64,
     pub center_gap: f64,
+    pub short_link: f64,
     pub ridge_range: f64,
     pub ridge_step: f64,
     pub force_fanout: Vec<String>,
@@ -432,6 +435,7 @@ impl Rules {
             ridge: cfg.ridge.unwrap_or(0.0),
             ridge_cost: cfg.ridge_cost.unwrap_or(0.0),
             center_gap: cfg.center_gap.unwrap_or(0.0),
+            short_link: cfg.short_link.unwrap_or(3.0),
             ridge_range: cfg.ridge_range.unwrap_or(1.2),
             ridge_step: cfg.ridge_step.unwrap_or(0.25),
             force_fanout: cfg.force_fanout.clone(),

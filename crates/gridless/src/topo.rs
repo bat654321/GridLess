@@ -1444,9 +1444,15 @@ impl<'a> Router<'a> {
         let n = self.pb.conns.len();
         let mut order: Vec<usize> = (0..n).collect();
         let pb = self.pb;
+        // The order that converges on this board: net priority, then width, then the
+        // straight length. `est_cost` (length + via) is used for the MST edges; ranking
+        // the whole queue by it was measured much slower and slightly worse.
         order.sort_by(|&a, &b| {
             let (ca, cb) = (&pb.conns[a], &pb.conns[b]);
-            cb.priority.cmp(&ca.priority).then(cb.width.partial_cmp(&ca.width).unwrap()).then(ca.est_len.partial_cmp(&cb.est_len).unwrap())
+            cb.priority
+                .cmp(&ca.priority)
+                .then(cb.width.partial_cmp(&ca.width).unwrap())
+                .then(ca.est_len.partial_cmp(&cb.est_len).unwrap())
         });
         self.queue = order.into_iter().collect();
         self.negotiate(0, self.rules.iterations);
