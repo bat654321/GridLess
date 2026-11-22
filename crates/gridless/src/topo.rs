@@ -957,7 +957,19 @@ impl<'a> Router<'a> {
             }
         }
         let hist_k = if pair_member { 0.2 } else { 1.0 };
-        let via_cost = self.rules.via_cost * self.via_scale * if pair_member { 5.0 } else { 1.0 };
+        // A net whose pads all share a layer can be routed without any via. Make a
+        // layer change expensive for such a connection, so it stays on its own layer
+        // instead of escaping to the other side and coming back.
+        let mut common: Option<Vec<crate::board::LayerId>> = None;
+        for pd in self.board.pads.iter().filter(|p| p.net == Some(net)) {
+            common = Some(match common {
+                None => pd.layers.clone(),
+                Some(c) => c.into_iter().filter(|l| pd.layers.contains(l)).collect(),
+            });
+        }
+        let single_layer = common.as_ref().is_some_and(|c| !c.is_empty());
+        let via_cost = self.rules.via_cost * self.via_scale * if pair_member { 5.0 } else { 1.0 }
+            * if single_layer { self.rules.same_layer_bias } else { 1.0 };
         let h_scale = if matches!(cn.couple, Some((_, false))) { 0.35 } else { 1.0 };
         let h = |li: usize, q: P| -> f64 {
             if to_site {

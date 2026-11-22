@@ -210,6 +210,9 @@ pub struct Config {
     /// while cleaning up a detour, multiply the layer direction weight by this
     /// (0 = off, 0.15 = nearly ignore the preferred direction for that re-route)
     pub detour_relax: Option<f64>,
+    /// a net whose pads all share one layer can be routed without a via; multiply the
+    /// via cost by this factor for such connections (1 = no bias)
+    pub same_layer_bias: Option<f64>,
     /// a link at or below this effective cost (mm, via included) is routed first
     pub short_link: Option<f64>,
     /// how connections enter the queue ("width", "cost", "short", "auto")
@@ -313,6 +316,7 @@ pub struct Rules {
     pub pad_exit: bool,
     pub mst_via_cost: bool,
     pub detour_relax: f64,
+    pub same_layer_bias: f64,
     pub short_link: f64,
     pub order: OrderMode,
     pub ridge_range: f64,
@@ -490,6 +494,7 @@ impl Rules {
             pad_exit: cfg.pad_exit,
             mst_via_cost: cfg.mst_via_cost,
             detour_relax: cfg.detour_relax.unwrap_or(0.0),
+            same_layer_bias: cfg.same_layer_bias.unwrap_or(1.0),
             short_link: cfg.short_link.unwrap_or(3.0),
             order: cfg.order.unwrap_or(OrderMode::Width),
             ridge_range: cfg.ridge_range.unwrap_or(1.2),
