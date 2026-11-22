@@ -32,6 +32,10 @@ use crate::kicad::glob_match;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
@@ -192,6 +196,20 @@ pub struct Config {
     /// soft pull of a crossing to the middle of its legal interval (0 = off,
     /// 1 = noticeable): the free gap between neighbours, wire-aware by construction
     pub center_gap: Option<f64>,
+    /// let a connection end on any unconnected component of its net instead of only
+    /// the pad the MST planned (dynamic terminals: Prim over components)
+    pub dynamic_terminals: Option<bool>,
+    /// leave rectangular pads through the midpoint of the edge the track heads for
+    /// (90 degree exit); costs extra length and some clearance, so it is off by default
+    #[serde(default)]
+    pub pad_exit: bool,
+    /// add via_cost to the MST edge when the two pads share no signal layer; off
+    /// makes the tree purely geometric (fewer layer changes, but more pour cuts)
+    #[serde(default = "default_true")]
+    pub mst_via_cost: bool,
+    /// while cleaning up a detour, multiply the layer direction weight by this
+    /// (0 = off, 0.15 = nearly ignore the preferred direction for that re-route)
+    pub detour_relax: Option<f64>,
     /// a link at or below this effective cost (mm, via included) is routed first
     pub short_link: Option<f64>,
     /// how connections enter the queue ("width", "cost", "short", "auto")
@@ -291,6 +309,10 @@ pub struct Rules {
     pub ridge: f64,
     pub ridge_cost: f64,
     pub center_gap: f64,
+    pub dynamic_terminals: bool,
+    pub pad_exit: bool,
+    pub mst_via_cost: bool,
+    pub detour_relax: f64,
     pub short_link: f64,
     pub order: OrderMode,
     pub ridge_range: f64,
@@ -464,6 +486,10 @@ impl Rules {
             ridge: cfg.ridge.unwrap_or(0.0),
             ridge_cost: cfg.ridge_cost.unwrap_or(0.0),
             center_gap: cfg.center_gap.unwrap_or(0.0),
+            dynamic_terminals: cfg.dynamic_terminals.unwrap_or(false),
+            pad_exit: cfg.pad_exit,
+            mst_via_cost: cfg.mst_via_cost,
+            detour_relax: cfg.detour_relax.unwrap_or(0.0),
             short_link: cfg.short_link.unwrap_or(3.0),
             order: cfg.order.unwrap_or(OrderMode::Width),
             ridge_range: cfg.ridge_range.unwrap_or(1.2),

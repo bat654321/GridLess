@@ -97,6 +97,8 @@ pub struct Router<'a> {
     /// the same for mesh vertices
     pour_v: Vec<Vec<f32>>,
     rip_base: f64,
+    /// temporary multiplier of the layer direction weight (detour clean-up relaxes it)
+    dir_scale: f64,
     /// distance field to copper per layer (empty when the ridge pull is off)
     field: Vec<Field>,
 }
@@ -214,7 +216,7 @@ impl<'a> Router<'a> {
             Vec::new()
         };
         let st = State { wires: Vec::new(), free_wires: Vec::new(), conns: vec![ConnState::default(); pb.conns.len()], layers, site_use: vec![None; pb.sites.len()] };
-        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v, field }
+        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v, dir_scale: 1.0, field }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -637,7 +639,7 @@ impl<'a> Router<'a> {
             dev += 45.0;
         }
         let dev45 = dev.min(45.0 - dev) / 22.5;
-        lr.cost * (1.0 + lr.dir_weight * off + self.rules.angle_cost * dev45)
+        lr.cost * (1.0 + lr.dir_weight * self.dir_scale * off + self.rules.angle_cost * dev45)
     }
 
     /// Cost factor for being close to copper: 0 on the ridge of the free space,
@@ -810,6 +812,41 @@ impl<'a> Router<'a> {
                 None
             }
         }
+    }
+
+    /// Dynamic terminals: all vertices of the net that are not in the source
+    /// component. Returns None when the source already covers the whole net, or
+    /// when the connection is not a plain pad-to-pad one.
+    fn endpoints_any(&self, c: usize) -> Option<(Vec<(usize, u32)>, Vec<(usize, u32)>, bool)> {
+        let cn = &self.pb.conns[c];
+        if !matches!(cn.b, Term::Pad(_)) || matches!(cn.kind, ConnKind::Pair { .. }) {
+            return None;
+        }
+        let (nodes, comp) = self.comp_nodes(cn.net, None);
+        let site_base = 1u64 << 32;
+        let to_verts = |set: &[u64]| -> Vec<(usize, u32)> {
+            let mut v = Vec::new();
+            for &x in set {
+                for (li, m) in self.meshes.iter().enumerate() {
+                    let mv = if x >= site_base { m.site_vert.get(&((x - site_base) as u32)) } else { m.pad_vert.get(&(x as u32)) };
+                    if let Some(&mv) = mv {
+                        v.push((li, mv));
+                    }
+                }
+            }
+            v
+        };
+        let pa = match cn.a {
+            Term::Pad(p) => p as u64,
+            Term::AnySite => return None,
+        };
+        let ra = comp.get(&pa).copied()?;
+        let set_a: Vec<u64> = nodes.iter().copied().filter(|x| comp.get(x) == Some(&ra)).collect();
+        let set_b: Vec<u64> = nodes.iter().copied().filter(|x| comp.get(x) != Some(&ra)).collect();
+        if set_b.is_empty() {
+            return None;
+        }
+        Some((to_verts(&set_a), to_verts(&set_b), false))
     }
 
     fn site_usable(&self, s: u32, net: NetId) -> bool {
@@ -1260,6 +1297,38 @@ impl<'a> Router<'a> {
         cs.failed = false;
     }
 
+    /// Like `commit`, but keeps the wires already placed for this connection:
+    /// the dynamic terminals join a second component with the same connection.
+    fn commit_more(&mut self, c: usize, f: &Found) {
+        let before = self.st.conns[c].wires.clone();
+        let mut sites = self.st.conns[c].sites.clone();
+        self.commit(c, f);
+        let mut wires = before;
+        wires.extend(self.st.conns[c].wires.iter().copied());
+        sites.extend(self.st.conns[c].sites.iter().copied());
+        sites.sort();
+        sites.dedup();
+        let cs = &mut self.st.conns[c];
+        cs.wires = wires;
+        cs.sites = sites;
+    }
+
+    /// Rip up the connections crossed by a found path (other nets only).
+    fn rip_crossed(&mut self, c: usize, f: &Found, ripped: &mut HashSet<usize>) {
+        for &w in &f.crossed {
+            if !self.st.wires[w as usize].alive {
+                continue;
+            }
+            let oc = self.st.wires[w as usize].conn as usize;
+            if oc != c && ripped.insert(oc) {
+                for r in self.ripup(oc) {
+                    self.st.conns[r].ripups += 1;
+                    self.queue.push_back(r);
+                }
+            }
+        }
+    }
+
     pub fn ripup(&mut self, c: usize) -> Vec<usize> {
         if self.pb.conns[c].couple.is_some() && self.st.conns[c].routed && log::log_enabled!(log::Level::Debug) {
             log::debug!("rip pair conn {c} ({})", std::backtrace::Backtrace::force_capture().to_string().lines().filter(|l| l.contains("gridless::")).take(4).map(|l| l.trim().to_string()).collect::<Vec<_>>().join(" <- "));
@@ -1370,22 +1439,41 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        // Dynamic terminals: end on the nearest unconnected component of the net,
+        // then join the planned target to it, so no leaf pad is left behind.
+        if self.rules.dynamic_terminals && !to_site && self.pb.conns[c].couple.is_none() {
+            if let Some((dsrc, ddst, _)) = self.endpoints_any(c) {
+                let snap = self.st.clone();
+                if let Some(f) = self.search(c, &dsrc, &ddst, false, budget) {
+                    self.commit(c, &f);
+                    let mut extra: Option<Found> = None;
+                    let mut ok = true;
+                    if let Some((s2, d2, ts2)) = self.endpoints(c) {
+                        match self.search(c, &s2, &d2, ts2, budget) {
+                            Some(f2) => extra = Some(f2),
+                            None => ok = false,
+                        }
+                    }
+                    if ok {
+                        if let Some(f2) = extra.as_ref() {
+                            self.commit_more(c, f2);
+                        }
+                        let mut ripped = HashSet::new();
+                        self.rip_crossed(c, &f, &mut ripped);
+                        if let Some(f2) = extra.as_ref() {
+                            self.rip_crossed(c, f2, &mut ripped);
+                        }
+                        return true;
+                    }
+                    self.st = snap;
+                }
+            }
+        }
         match self.search(c, &srcs, &dsts, to_site, budget) {
             Some(f) => {
                 self.commit(c, &f);
                 let mut ripped = HashSet::new();
-                for &w in &f.crossed {
-                    if !self.st.wires[w as usize].alive {
-                        continue;
-                    }
-                    let oc = self.st.wires[w as usize].conn as usize;
-                    if oc != c && ripped.insert(oc) {
-                        for r in self.ripup(oc) {
-                            self.st.conns[r].ripups += 1;
-                            self.queue.push_back(r);
-                        }
-                    }
-                }
+                self.rip_crossed(c, &f, &mut ripped);
                 true
             }
             None => {
@@ -1708,6 +1796,13 @@ impl<'a> Router<'a> {
             }
             self.rip_base = 1e6;
             self.pres_fac = 50.0;
+            // A detour often exists because the layer's preferred direction made a
+            // short perpendicular hop more expensive than a long way round. Let this
+            // re-route ignore the direction for a moment and take the shorter path.
+            let ds = self.dir_scale;
+            if self.rules.detour_relax > 0.0 {
+                self.dir_scale = self.rules.detour_relax;
+            }
             let mut ok = true;
             // the detouring connection first, then the others (dependants included)
             let mut order = vec![c];
@@ -1731,10 +1826,14 @@ impl<'a> Router<'a> {
                 let (ov, _) = self.total_overflow();
                 let new: f64 = ripped.iter().map(|&k| self.conn_score(k)).sum::<f64>();
                 let old_all: f64 = old + ripped.iter().filter(|k| !group.contains(k)).count() as f64 * 0.0;
-                ok = ov <= ov0 + 1e-6 && new < old_all - 0.5;
+                // a relaxed-direction re-route must earn its place: only a clearly
+                // shorter path (>=15 %) may disturb the settled board
+                ok = ov <= ov0 + 1e-6
+                    && if self.rules.detour_relax > 0.0 { new < old_all * 0.85 } else { new < old_all - 0.5 };
             }
             self.rip_base = rb;
             self.pres_fac = pf;
+            self.dir_scale = ds;
             log::debug!(
                 "detour group {:?} (old score {:.2}): {}",
                 group.iter().map(|&k| self.board.nets[self.pb.conns[k].net].name.clone()).collect::<Vec<_>>(),

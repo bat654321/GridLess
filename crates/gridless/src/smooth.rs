@@ -156,6 +156,64 @@ fn turn(u: P, v: P) -> f64 {
     u.cross(v).atan2(u.dot(v)).abs()
 }
 
+/// Midpoint of the rectangle edge the track should leave through: the edge whose
+/// outward normal best matches the direction from the pad centre to `q`. The segment
+/// centre -> midpoint is perpendicular to that edge by construction.
+fn pad_normals(pd: &crate::board::Pad) -> Vec<P> {
+    let pts = &pd.shape.pts;
+    if pts.len() != 4 {
+        return Vec::new();
+    }
+    let c = pd.pos;
+    let mut out = Vec::new();
+    for i in 0..4 {
+        let a = pts[i];
+        let b = pts[(i + 1) % 4];
+        let mid = a.mid(b);
+        let e = (b - a).norm();
+        if e.len() < 1e-9 {
+            continue;
+        }
+        let mut n = P { x: -e.y, y: e.x };
+        if n.dot(mid - c) < 0.0 {
+            n = P { x: -n.x, y: -n.y };
+        }
+        out.push(n);
+    }
+    out
+}
+
+fn pad_edge_mid(pd: &crate::board::Pad, q: P) -> Option<P> {
+    let pts = &pd.shape.pts;
+    if pts.len() != 4 {
+        return None;
+    }
+    let c = pd.pos;
+    let d = q - c;
+    if d.len() < 1e-9 {
+        return None;
+    }
+    let u = d.norm();
+    let mut best: Option<P> = None;
+    let mut bd = -1.0;
+    for i in 0..4 {
+        let a = pts[i];
+        let b = pts[(i + 1) % 4];
+        let mid = a.mid(b);
+        let e = (b - a).norm();
+        let mut n = P { x: -e.y, y: e.x };
+        if n.dot(mid - c) < 0.0 {
+            n = P { x: -n.x, y: -n.y };
+        }
+        let al = n.dot(u);
+        if al > bd {
+            bd = al;
+            best = Some(mid);
+        }
+    }
+    best
+}
+
 pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) -> Stats {
     let max_clr = rules.nets.iter().map(|n| n.clearance).fold(rules.default_clearance, f64::max);
     let max_w = geo.tracks.iter().map(|t| t.width).fold(rules.via_dia, f64::max);
@@ -191,14 +249,14 @@ pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) ->
             let (prims, pw) = if end == 0 { (t.prims.clone(), t.pw.clone()) } else { reverse(&t.prims, &t.pw) };
             let s = prims[0].start();
             // the pad the track starts at: its centre, or the far end of its escape stub
-            let mut origin: Option<(P, Option<usize>)> = None;
+            let mut origin: Option<(P, Option<usize>, usize)> = None;
             for (pi, pd) in board.pads.iter().enumerate() {
                 if pd.net != Some(net) || !pd.layers.contains(&layer) {
                     continue;
                 }
                 // the track starts in the pad (its anchor, or the centroid of an odd-shaped pad)
                 if pd.pos.dist(s) < 1e-4 || pd.shape.dist(s) <= 1e-6 {
-                    origin = Some((s, None));
+                    origin = Some((s, None, pi));
                     break;
                 }
                 if let Some((e, _)) = pb.escape[pi] {
@@ -207,13 +265,14 @@ pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) ->
                         let stub = geo.tracks.iter().position(|x| x.net == net && x.layer == layer && x.prims.len() == 1 && x.prims[0].start().dist(pd.pos) < 1e-6 && x.prims[0].end().dist(e) < 1e-6);
                         let others = geo.tracks.iter().enumerate().filter(|&(j, x)| j != ti && Some(j) != stub && x.net == net && x.layer == layer && x.prims.first().is_some_and(|f| f.start().dist(e) < 1e-4 || x.prims.last().unwrap().end().dist(e) < 1e-4)).count();
                         if let (Some(si), 0) = (stub, others) {
-                            origin = Some((pd.pos, Some(si)));
+                            origin = Some((pd.pos, Some(si), pi));
                         }
                         break;
                     }
                 }
             }
-            let Some((o, stub)) = origin else { continue };
+            let Some((o, stub, pi)) = origin else { continue };
+            let pd = &board.pads[pi];
             // uniform width only (a necked entry stays as it is)
             let w = pw[0];
             // candidates: ends of the primitives (and points along segments), farthest first
@@ -267,12 +326,28 @@ pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) ->
                         continue;
                     }
                 }
-                if !ix.fits(rules, layer, net, w, &[(o, q)], &skip) {
+                // Perpendicular pad exit: leave the rectangle through the midpoint of
+                // the edge the track heads for. A small extra length is accepted - a
+                // clean 90 degree entry is worth more than a hair of copper.
+                let mut entry: Vec<Prim> = vec![Prim::Seg(o, q)];
+                let mut ok = ix.fits(rules, layer, net, w, &[(o, q)], &skip);
+                if rules.pad_exit {
+                    if let Some(e) = pad_edge_mid(pd, q) {
+                        let extra = o.dist(e) + e.dist(q) - o.dist(q);
+                        if extra >= -0.05 && extra <= 0.8 {
+                            if ix.fits(rules, layer, net, w, &[(o, e), (e, q)], &skip) {
+                                entry = vec![Prim::Seg(o, e), Prim::Seg(e, q)];
+                                ok = true;
+                            }
+                        }
+                    }
+                }
+                if !ok {
                     continue;
                 }
-                let mut np = vec![Prim::Seg(o, q)];
+                let mut np = entry;
                 np.extend(rest);
-                let mut nw = vec![w];
+                let mut nw = vec![w; np.len() - rest_w.len()];
                 nw.extend(rest_w);
                 let (np, nw) = if end == 0 { (np, nw) } else { reverse(&np, &nw) };
                 ix.drop_track(ti);
@@ -289,6 +364,66 @@ pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) ->
                 st.entries += 1;
                 break;
             }
+        }
+        // ---- perpendicular exits from rectangular pads, whether or not a hook was
+        // unwound above: the first segment leaves through the midpoint of the edge the
+        // track heads for, so the visible track meets the pad at 90 degrees.
+        if rules.pad_exit {
+        for end in 0..2 {
+            let t = &geo.tracks[ti];
+            if t.prims.is_empty() {
+                continue;
+            }
+            let (prims, pw) = if end == 0 { (t.prims.clone(), t.pw.clone()) } else { reverse(&t.prims, &t.pw) };
+            let s = prims[0].start();
+            let mut found: Option<(usize, P)> = None;
+            for (pi, pd) in board.pads.iter().enumerate() {
+                if pd.net != Some(net) || !pd.layers.contains(&layer) {
+                    continue;
+                }
+                if pd.pos.dist(s) < 1e-4 {
+                    found = Some((pi, pd.pos));
+                    break;
+                }
+            }
+            let Some((pi, o)) = found else { continue };
+            let pd = &board.pads[pi];
+            if pd.shape.pts.len() != 4 || pd.shape.r > 0.3 {
+                continue;
+            }
+            let Prim::Seg(_, q) = prims[0] else { continue };
+            let w = pw[0];
+            if o.dist(q) < 0.15 {
+                continue;
+            }
+            let u = (q - o).norm();
+            let ns = pad_normals(pd);
+            if ns.iter().any(|n| n.dot(u) > 0.985) {
+                continue; // already within ~10 degrees of an edge normal
+            }
+            let Some(e) = pad_edge_mid(pd, q) else { continue };
+            if o.dist(e) < 1e-3 {
+                continue;
+            }
+            let extra = o.dist(e) + e.dist(q) - o.dist(q);
+            if extra > 1.0 {
+                continue;
+            }
+            if !ix.fits(rules, layer, net, w, &[(o, e), (e, q)], &[ti]) {
+                continue;
+            }
+            let mut np = vec![Prim::Seg(o, e), Prim::Seg(e, q)];
+            let mut nw = vec![w, w];
+            np.extend_from_slice(&prims[1..]);
+            nw.extend_from_slice(&pw[1..]);
+            let (np, nw) = if end == 0 { (np, nw) } else { reverse(&np, &nw) };
+            ix.drop_track(ti);
+            geo.tracks[ti].prims = np;
+            geo.tracks[ti].pw = nw;
+            let t = &geo.tracks[ti];
+            ix.add_track(ti, t.layer, t.net, &t.prims, &t.pw);
+            st.entries += 1;
+        }
         }
         // ---- rounded kinks between two segments
         let mut i = 0;

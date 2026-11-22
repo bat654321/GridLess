@@ -514,7 +514,7 @@ fn mst_grouped(b: &Board, rules: &Rules, pads: &[usize], group: Option<&[usize]>
         let a = &b.pads[pads[i]];
         let c = &b.pads[pads[j]];
         let common = a.layers.iter().any(|l| c.layers.contains(l) && rules.layers[*l].role == LayerRole::Signal);
-        a.pos.dist(c.pos) + if common { 0.0 } else { rules.via_cost }
+        a.pos.dist(c.pos) + if common || !rules.mst_via_cost { 0.0 } else { rules.via_cost }
     };
     let mut in_tree = vec![false; n];
     let mut best = vec![(f64::INFINITY, usize::MAX); n];
