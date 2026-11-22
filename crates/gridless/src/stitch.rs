@@ -336,6 +336,64 @@ fn overlap_points(a: &Island, b: &Island) -> Vec<P> {
     out
 }
 
+/// A clear spot on the island for a stitching via: a same-net SMD pad inside it first
+/// (via-in-pad is always legal), then a 0.5 mm grid over the island's bounding box.
+fn island_via_spot(
+    b: &Board,
+    rules: &Rules,
+    isl: &Island,
+    net: NetId,
+    vr: f64,
+    vias: &[(P, NetId)],
+) -> Option<P> {
+    let mut cands: Vec<P> = Vec::new();
+    for pd in b
+        .pads
+        .iter()
+        .filter(|pd| pd.net == Some(net) && pd.kind == crate::board::PadKind::Smd)
+    {
+        if pd.layers.contains(&isl.layer) && point_in_poly(pd.pos, &isl.poly) {
+            cands.push(pd.pos);
+        }
+    }
+    cands.push(isl.center);
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for q in &isl.poly {
+        x0 = x0.min(q.x);
+        y0 = y0.min(q.y);
+        x1 = x1.max(q.x);
+        y1 = y1.max(q.y);
+    }
+    let step = 0.5;
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let q = p(x, y);
+            if point_in_poly(q, &isl.poly) {
+                cands.push(q);
+            }
+            x += step;
+        }
+        y += step;
+    }
+    for q in cands {
+        if !via_clear(b, rules, q, net, vr) {
+            continue;
+        }
+        if vias.iter().any(|(v, _)| v.dist(q) < rules.via_dia + 0.2) {
+            continue;
+        }
+        return Some(q);
+    }
+    None
+}
+
 pub fn stitch(
     b: &Board,
     rules: &Rules,
@@ -738,6 +796,43 @@ pub fn stitch(
                 if stitched {
                     break;
                 }
+            }
+            if stitched {
+                continue;
+            }
+            // The two layers' pours do not overlap: drop a via on the island and reach the
+            // other layer's pour with a short track. That is what a person does when the
+            // fill is cut by signals - the opposite layer is usually free there.
+            if let Some(q) = island_via_spot(b, rules, isl, net, vr, &vias) {
+                let mut partners: Vec<usize> =
+                    idx.iter().copied().filter(|&j| islands[j].layer != isl.layer).collect();
+                partners.sort_by(|&a, &b| {
+                    islands[a].center.dist(q).total_cmp(&islands[b].center.dist(q))
+                });
+                for j in partners.into_iter().take(3) {
+                    let c = &islands[j];
+                    let (t, d) = nearest_on_poly(&c.poly, q);
+                    if d > 5.0 {
+                        log::info!("stitch: via at ({:.2},{:.2}) - other-layer pour {:.2} mm away", q.x, q.y, d);
+                        continue;
+                    }
+                    let w = rules.nets[net].width;
+                    if !seg_clear(b, rules, q, t, net, w, c.layer) {
+                        log::info!("stitch: via at ({:.2},{:.2}) - track to pour not clear ({:.2} mm)", q.x, q.y, d);
+                        continue;
+                    }
+                    vias.push((q, net));
+                    stubs.push(TrackStub { layer: c.layer, net, a: q, b: t, width: w });
+                    rep.added += 1;
+                    rep.tracks += 1;
+                    stitched = true;
+                    break;
+                }
+            } else {
+                log::info!(
+                    "stitch: island {:.1} mm2 at ({:.1},{:.1}) - no clear via spot",
+                    isl.area, isl.center.x, isl.center.y
+                );
             }
             if stitched {
                 continue;
