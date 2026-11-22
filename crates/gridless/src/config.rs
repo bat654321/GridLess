@@ -41,6 +41,32 @@ pub enum Direction {
     Vertical,
 }
 
+/// Order in which connections enter the negotiation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderMode {
+    /// net priority, then width, then straight length (the proven order)
+    #[default]
+    Width,
+    /// short links that need no new via, then power nets, then the rest
+    Cost,
+    /// shortest effective cost first, pairs first
+    Short,
+    /// try Width, Cost and Short and keep the best by DRC score
+    Auto,
+}
+
+impl OrderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            OrderMode::Width => "width",
+            OrderMode::Cost => "cost",
+            OrderMode::Short => "short",
+            OrderMode::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReserveMode {
@@ -168,6 +194,8 @@ pub struct Config {
     pub center_gap: Option<f64>,
     /// a link at or below this effective cost (mm, via included) is routed first
     pub short_link: Option<f64>,
+    /// how connections enter the queue ("width", "cost", "short", "auto")
+    pub order: Option<OrderMode>,
     /// distance from copper (mm) at which the ridge pull has faded out
     pub ridge_range: Option<f64>,
     /// grid step (mm) of the distance field
@@ -264,6 +292,7 @@ pub struct Rules {
     pub ridge_cost: f64,
     pub center_gap: f64,
     pub short_link: f64,
+    pub order: OrderMode,
     pub ridge_range: f64,
     pub ridge_step: f64,
     pub force_fanout: Vec<String>,
@@ -436,6 +465,7 @@ impl Rules {
             ridge_cost: cfg.ridge_cost.unwrap_or(0.0),
             center_gap: cfg.center_gap.unwrap_or(0.0),
             short_link: cfg.short_link.unwrap_or(3.0),
+            order: cfg.order.unwrap_or(OrderMode::Width),
             ridge_range: cfg.ridge_range.unwrap_or(1.2),
             ridge_step: cfg.ridge_step.unwrap_or(0.25),
             force_fanout: cfg.force_fanout.clone(),

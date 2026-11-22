@@ -123,6 +123,73 @@ fn load_config(board: &Path, cfg: &Option<PathBuf>) -> Result<Config> {
     }
 }
 
+/// Route with each connection order and keep the board KiCad's own DRC likes best.
+/// The router's internal DRC misses some real defects (shorts, track crossings), so the
+/// selection has to be made by the same engine that will check the board.
+fn multi_start(
+    l: &gridless::kicad::Loaded,
+    rules: &Rules,
+    pb: &Problem,
+    rounds: usize,
+    board: &Path,
+    project: &Option<PathBuf>,
+    t0: Instant,
+) -> Result<gridless::pipeline::Outcome> {
+    use gridless::config::OrderMode;
+    let cli = gridless::pipeline::find_kicad_cli();
+    let dir = std::env::temp_dir().join(format!("gridless_ms_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let pro = project.clone().unwrap_or_else(|| board.with_extension("kicad_pro"));
+    let mut best: Option<((usize, usize, usize, i64), gridless::pipeline::Outcome)> = None;
+    for mode in [OrderMode::Width, OrderMode::Cost, OrderMode::Short] {
+        let mut r = rules.clone();
+        r.order = mode;
+        let label = mode.label();
+        log::info!("[order {label}] start ({:.1}s)", t0.elapsed().as_secs_f64());
+        let o = gridless::pipeline::route(&l.board, &r, pb, rounds, &mut |m| {
+            log::info!("[order {label}] {m} ({:.2}s)", t0.elapsed().as_secs_f64())
+        });
+        let tmp = dir.join(format!("{label}.kicad_pcb"));
+        let items = gridless::output::items(&l.board, &o.geo, &r);
+        gridless::kicad::write_routed(&l.source, &tmp, &items, !r.keep_existing)?;
+        let mut viol = o.drc.violations.len();
+        let mut unc = o.drc.unconnected.len() + o.stats.unrouted;
+        if let Some(cli) = cli.as_deref() {
+            log::info!("[order {label}] project {} (exists {})", pro.display(), pro.exists());
+            if pro.exists() {
+                let target = dir.join(format!("{label}.kicad_pro"));
+                match std::fs::copy(&pro, &target) {
+                    Ok(_) => log::info!("[order {label}] project copied to {}", target.display()),
+                    Err(e) => log::warn!("[order {label}] project copy failed: {e}"),
+                }
+            }
+            let report = dir.join(format!("{label}.drc.json"));
+            let st = std::process::Command::new(cli)
+                .args(["pcb", "drc", "--format", "json", "--units", "mm", "--severity-all", "--refill-zones", "-o"])
+                .arg(&report)
+                .arg(&tmp)
+                .output()?;
+            if report.is_file() {
+                if let Some((v, sh, u)) = gridless::pipeline::kicad_drc_counts(&report) {
+                    viol = v + 8 * sh;
+                    unc = u;
+                }
+            } else {
+                log::warn!("[order {label}] kicad-cli drc failed: {}", String::from_utf8_lossy(&st.stderr));
+            }
+        }
+        let key = (unc * 3 + viol, unc, o.geo.vias.len(), (o.length * 10.0) as i64);
+        log::info!("[order {label}] {viol} violations, {unc} unconnected -> key {:?}", key);
+        if best.as_ref().map_or(true, |(bk, _)| key < *bk) {
+            best = Some((key, o));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let (key, o) = best.context("multi-start produced no routing")?;
+    log::info!("[order] keeping the best: key {:?}", key);
+    Ok(o)
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).format_timestamp(None).init();
     let cli = Cli::parse();
@@ -323,7 +390,11 @@ fn main() -> Result<()> {
                 rules.diff_pairs.len()
             );
             let rounds = rounds.unwrap_or(8);
-            let out = gridless::pipeline::route(&l.board, &rules, &pb, rounds, &mut |m| log::info!("{m} ({:.2}s)", t0.elapsed().as_secs_f64()));
+            let out = if rules.order == gridless::config::OrderMode::Auto {
+                multi_start(&l, &rules, &pb, rounds, &board, &project, t0)?
+            } else {
+                gridless::pipeline::route(&l.board, &rules, &pb, rounds, &mut |m| log::info!("{m} ({:.2}s)", t0.elapsed().as_secs_f64()))
+            };
             let geo = out.geo;
             for w in &geo.warnings {
                 log::warn!("{w}");

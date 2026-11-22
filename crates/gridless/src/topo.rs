@@ -1444,15 +1444,38 @@ impl<'a> Router<'a> {
         let n = self.pb.conns.len();
         let mut order: Vec<usize> = (0..n).collect();
         let pb = self.pb;
-        // The order that converges on this board: net priority, then width, then the
-        // straight length. `est_cost` (length + via) is used for the MST edges; ranking
-        // the whole queue by it was measured much slower and slightly worse.
+        let short = self.rules.short_link.max(0.0);
+        let mode = self.rules.order;
         order.sort_by(|&a, &b| {
             let (ca, cb) = (&pb.conns[a], &pb.conns[b]);
-            cb.priority
-                .cmp(&ca.priority)
-                .then(cb.width.partial_cmp(&ca.width).unwrap())
-                .then(ca.est_len.partial_cmp(&cb.est_len).unwrap())
+            match mode {
+                // short links that need no new via first, then power nets, then the rest
+                crate::config::OrderMode::Cost => {
+                    let cat = |c: &crate::problem::Conn| -> u8 {
+                        if c.couple.is_some() || c.est_cost <= short {
+                            0
+                        } else if c.priority > 0 {
+                            1
+                        } else {
+                            2
+                        }
+                    };
+                    cat(ca).cmp(&cat(cb)).then(ca.est_cost.partial_cmp(&cb.est_cost).unwrap())
+                }
+                // pure shortest effective cost, pairs first
+                crate::config::OrderMode::Short => ca
+                    .couple
+                    .is_some()
+                    .cmp(&cb.couple.is_some())
+                    .reverse()
+                    .then(ca.est_cost.partial_cmp(&cb.est_cost).unwrap()),
+                // the proven order: net priority, then width, then straight length
+                _ => cb
+                    .priority
+                    .cmp(&ca.priority)
+                    .then(cb.width.partial_cmp(&ca.width).unwrap())
+                    .then(ca.est_len.partial_cmp(&cb.est_len).unwrap()),
+            }
         });
         self.queue = order.into_iter().collect();
         self.negotiate(0, self.rules.iterations);

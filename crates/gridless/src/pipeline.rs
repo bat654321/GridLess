@@ -353,6 +353,29 @@ pub fn kicad_unconnected_spots(report: &std::path::Path) -> Vec<(String, crate::
 
 /// Run KiCad's DRC (with zone refill) on a routed board and return the pads of plane
 /// nets that ended up unconnected, as "REF.PAD" labels.
+/// Error-severity violations, shorts/crossings and unconnected items from a KiCad DRC
+/// JSON report. Warnings (library footprints, padstack, silk) are noise and must not
+/// decide the multi-start ranking; shorts are weighted extra because a board with one
+/// is unusable however few other violations it has.
+pub fn kicad_drc_counts(report: &std::path::Path) -> Option<(usize, usize, usize)> {
+    let txt = std::fs::read_to_string(report).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    let errs: Vec<&serde_json::Value> = v["violations"]
+        .as_array()
+        .map(|a| a.iter().filter(|x| x["severity"] == "error").collect())
+        .unwrap_or_default();
+    let viol = errs.len();
+    let shorts = errs
+        .iter()
+        .filter(|x| {
+            let t = x["type"].as_str().unwrap_or("");
+            t == "shorting_items" || t == "tracks_crossing"
+        })
+        .count();
+    let unc = v["unconnected_items"].as_array().map(|a| a.len()).unwrap_or(0);
+    Some((viol, shorts, unc))
+}
+
 pub fn kicad_unconnected_plane_pads(cli: &std::path::Path, routed: &std::path::Path, project: Option<&std::path::Path>, board: &Board, rules: &Rules) -> anyhow::Result<Vec<String>> {
     let dir = std::env::temp_dir().join(format!("gridless_drc_{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
