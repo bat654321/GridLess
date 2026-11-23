@@ -645,7 +645,10 @@ fn pad_escapes(b: &Board, rules: &Rules, obstacles: &[Obstacle]) -> Vec<Option<(
         }
         let wmin = pd.shape.min_width();
         let half_len = pts.iter().map(|q| (*q - pd.pos).dot(axis).abs()).fold(0.0, f64::max) + pd.shape.r;
-        if wmin > 0.3 || 2.0 * half_len < 1.4 * wmin {
+        // fine pitch: no track of the net fits between this pin and a neighbour of its part
+        let chan = rules.nets[net].width.max(b.rules.min_track_width) + 2.0 * rules.nets[net].clearance;
+        let tight = b.pads.iter().enumerate().any(|(j, q)| j != i && q.footprint == pd.footprint && q.layers == pd.layers && q.shape.shape_dist(&pd.shape) < chan);
+        if !(wmin <= 0.3 || (tight && wmin <= 0.35)) || 2.0 * half_len < 1.4 * wmin {
             continue; // not a fine-pitch elongated pad
         }
         let away = pd.pos - b.footprints[pd.footprint].pos;
@@ -653,6 +656,12 @@ fn pad_escapes(b: &Board, rules: &Rules, obstacles: &[Obstacle]) -> Vec<Option<(
             continue; // centre / thermal pad
         }
         if away.dot(axis) < 0.0 {
+            axis = -axis;
+        }
+        // a pin joined to a pin across the body of its own part leaves inwards, the way a
+        // designer runs it under the part
+        let across = b.pads.iter().enumerate().any(|(j, q)| j != i && q.net == pd.net && q.footprint == pd.footprint && q.layers == pd.layers && (q.pos - pd.pos).dot(axis) < -half_len);
+        if across {
             axis = -axis;
         }
         let w = rules.nets[net].width.min(wmin.max(b.rules.min_track_width));

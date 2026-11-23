@@ -116,6 +116,7 @@ fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progres
             let layer = v.layer.or(v.track.map(|(ti, _)| geo.tracks[ti].layer));
             feedback.push((layer, v.at, conn));
         }
+        let broken: Vec<String> = rep.unconnected.clone();
         let improved = best.as_ref().map_or(true, |b| sc < b.0);
         if improved {
             best = Some((sc, geo, rep, r.stats.clone()));
@@ -160,6 +161,18 @@ fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progres
                 }
             }
         }
+        // a net the geometry left in pieces (a wire lost while threading it into the
+        // realisation mesh): route all its connections again
+        for u in &broken {
+            let name = u.split(" (").next().unwrap_or("");
+            if let Some(ni) = board.net_id(name) {
+                for (c, cn) in pb.conns.iter().enumerate() {
+                    if cn.net == ni && !to_rip.contains(&c) {
+                        to_rip.push(c);
+                    }
+                }
+            }
+        }
         r.reroute(&to_rip, 10);
         r.minimise_vias();
         r.improve(1);
@@ -181,6 +194,12 @@ fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progres
         // keep the stage on the layers it did not make worse; returns the new report
         let guard = |stage: &str, geo: &mut Geometry, before: Vec<crate::geometry::Track>, rep_before: &Report, progress: &mut dyn FnMut(&str)| -> Report {
             let mut rep = drc::check(board, pb, rules, geo);
+            if rep.unconnected.len() > rep_before.unconnected.len() {
+                // the stage broke a connection (a dropped stub, a moved end): undo it all
+                progress(&format!("{stage} dropped: it left {:?} unconnected", rep.unconnected));
+                geo.tracks = before;
+                return rep_before.clone();
+            }
             let (b, a) = (per_layer(rep_before, &before), per_layer(&rep, &geo.tracks));
             let worse: Vec<usize> = (0..board.layers.len()).filter(|&l| a[l] > b[l]).collect();
             if !worse.is_empty() {
@@ -212,7 +231,7 @@ fn route_once(board: &Board, rules: &Rules, pb: &Problem, rounds: usize, progres
             progress(&format!("finishing: {}; {} violations, length {:.1} -> {:.1} mm", what.join(", "), crep.violations.len(), best_sc.3 as f64 / 10.0, sc.3 as f64 / 10.0));
             drc = crep;
         } else {
-            progress(&format!("finishing dropped: {} violations instead of {}", crep.violations.len(), drc.violations.len()));
+            progress(&format!("finishing dropped: {} violations instead of {}, unconnected {:?}", crep.violations.len(), drc.violations.len(), crep.unconnected));
             geo.tracks = tight_tracks;
         }
     }

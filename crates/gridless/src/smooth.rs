@@ -264,7 +264,9 @@ pub fn smooth(board: &Board, pb: &Problem, rules: &Rules, geo: &mut Geometry) ->
                         // the stub can go only if no other track of the net starts there
                         let stub = geo.tracks.iter().position(|x| x.net == net && x.layer == layer && x.prims.len() == 1 && x.prims[0].start().dist(pd.pos) < 1e-6 && x.prims[0].end().dist(e) < 1e-6);
                         let others = geo.tracks.iter().enumerate().filter(|&(j, x)| j != ti && Some(j) != stub && x.net == net && x.layer == layer && x.prims.first().is_some_and(|f| f.start().dist(e) < 1e-4 || x.prims.last().unwrap().end().dist(e) < 1e-4)).count();
-                        if let (Some(si), 0) = (stub, others) {
+                        // nor a via that sits on the stub's end
+                        let via_on = geo.vias.iter().any(|&(v, n)| n == net && v.dist(e) < rules.via_dia / 2.0 + 1e-3);
+                        if let (Some(si), 0, false) = (stub, others, via_on) {
                             origin = Some((pd.pos, Some(si), pi));
                         }
                         break;

@@ -1607,10 +1607,26 @@ impl<'a> Router<'a> {
                 4 // SMD pads on different layers: a via is inevitable anyway
             }
         };
+        // Knots: groups of short links whose ends lie close together (a part and its
+        // neighbours, like the relay K1 with its diodes). A designer settles each knot
+        // first, then runs the long tracks away from it.
+        let knot = if mode == crate::config::OrderMode::Logic { self.knots() } else { vec![None; n] };
         order.sort_by(|&a, &b| {
             let (ca, cb) = (&pb.conns[a], &pb.conns[b]);
             match mode {
-                crate::config::OrderMode::Logic => logic_cat(ca).cmp(&logic_cat(cb)).then(ca.est_len.partial_cmp(&cb.est_len).unwrap()),
+                crate::config::OrderMode::Logic => {
+                    // knots first, the densest first, each knot kept together; inside a
+                    // knot and outside the knots the designer's order
+                    let key = |k: Option<(usize, f64)>| match k {
+                        Some((id, dens)) => (0u8, -dens, id),
+                        None => (1u8, 0.0, 0),
+                    };
+                    key(knot[a])
+                        .partial_cmp(&key(knot[b]))
+                        .unwrap()
+                        .then(logic_cat(ca).cmp(&logic_cat(cb)))
+                        .then(ca.est_len.partial_cmp(&cb.est_len).unwrap())
+                }
                 // short links that need no new via first, then power nets, then the rest
                 crate::config::OrderMode::Cost => {
                     let cat = |c: &crate::problem::Conn| -> u8 {
@@ -1641,6 +1657,110 @@ impl<'a> Router<'a> {
         });
         self.queue = order.into_iter().collect();
         self.negotiate(0, self.rules.iterations);
+    }
+
+    /// Knots of short links: (knot id, density) per connection, None outside a knot.
+    /// Two short pad-to-pad links belong to one knot when an end of one lies within
+    /// `KNOT_NEAR` of an end of the other. A knot needs `KNOT_MIN` links; its density is
+    /// links per square millimetre of its bounding box, so a relay with its diodes beats
+    /// a loose chain of resistors.
+    pub fn knots(&self) -> Vec<Option<(usize, f64)>> {
+        const KNOT_LEN: f64 = 6.0;
+        const KNOT_NEAR: f64 = 1.0;
+        const KNOT_MIN: usize = 3;
+        // a knot must stay small, or chaining grows it over half the board
+        const KNOT_SPAN: f64 = 8.0;
+        let n = self.pb.conns.len();
+        let ends: Vec<Option<(P, P)>> = self
+            .pb
+            .conns
+            .iter()
+            .map(|c| match (c.a, c.b) {
+                (Term::Pad(x), Term::Pad(y)) if c.couple.is_none() && c.est_len <= KNOT_LEN => Some((self.board.pads[x].pos, self.board.pads[y].pos)),
+                _ => None,
+            })
+            .collect();
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            x
+        }
+        // the shortest links join first, so a knot grows from its densest core; a merge
+        // that would make the knot wider than KNOT_SPAN is refused
+        let mut bbs: Vec<crate::geom::BBox> = ends
+            .iter()
+            .map(|e| {
+                let mut b = crate::geom::BBox::empty();
+                if let Some((p, q)) = e {
+                    b.add(*p);
+                    b.add(*q);
+                }
+                b
+            })
+            .collect();
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for i in 0..n {
+            let Some((a, b)) = ends[i] else { continue };
+            for j in i + 1..n {
+                let Some((c, d)) = ends[j] else { continue };
+                let dmin = [a, b].iter().flat_map(|p| [c, d].map(|q| p.dist(q))).fold(f64::INFINITY, f64::min);
+                if dmin <= KNOT_NEAR {
+                    pairs.push((a.dist(b) + c.dist(d), i, j));
+                }
+            }
+        }
+        pairs.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        for (_, i, j) in pairs {
+            let (x, y) = (find(&mut parent, i), find(&mut parent, j));
+            if x == y {
+                continue;
+            }
+            let u = bbs[x].union(&bbs[y]);
+            if u.w().max(u.h()) > KNOT_SPAN {
+                continue;
+            }
+            parent[x] = y;
+            bbs[y] = u;
+        }
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            if ends[i].is_some() {
+                let r = find(&mut parent, i);
+                groups.entry(r).or_default().push(i);
+            }
+        }
+        let mut out = vec![None; n];
+        for (id, (_, g)) in groups.into_iter().enumerate() {
+            if g.len() < KNOT_MIN {
+                continue;
+            }
+            let mut bb = crate::geom::BBox::empty();
+            for &i in &g {
+                let (a, b) = ends[i].unwrap();
+                bb.add(a);
+                bb.add(b);
+            }
+            let dens = g.len() as f64 / ((bb.w() + 1.0) * (bb.h() + 1.0));
+            for &i in &g {
+                out[i] = Some((id, dens));
+            }
+        }
+        if log::log_enabled!(log::Level::Debug) {
+            let mut seen: Vec<usize> = Vec::new();
+            for (i, k) in out.iter().enumerate() {
+                if let Some((id, d)) = k {
+                    if !seen.contains(id) {
+                        seen.push(*id);
+                        let members: Vec<String> = (0..n).filter(|&j| out[j].map(|x| x.0) == Some(*id)).map(|j| self.board.nets[self.pb.conns[j].net].name.clone()).collect();
+                        log::debug!("knot {id} (density {d:.2}, first conn {i}): {members:?}");
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// TopoR-style via minimisation: re-route every connection that uses vias with a

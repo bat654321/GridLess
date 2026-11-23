@@ -12,6 +12,7 @@ pub fn items(b: &Board, g: &Geometry, rules: &Rules) -> Vec<OutItem> {
         let layer = b.layers[t.layer].name.clone();
         let net = b.nets[t.net].name.clone();
         let mut prims: Vec<(Prim, f64)> = t.prims.iter().enumerate().map(|(i, &p)| (p, t.pw.get(i).copied().unwrap_or(t.width))).collect();
+        prims = merge_slivers(prims);
         // KiCad does not count an arc that ends right at a pad or via as connected: a track
         // that starts or ends with an arc gets its last 20 um as a straight segment
         // (deviation well under a micrometre)
@@ -58,6 +59,42 @@ pub fn items(b: &Board, g: &Geometry, rules: &Rules) -> Vec<OutItem> {
     }
     for &(pos, n) in &g.vias {
         out.push(OutItem::Via { net: b.nets[n].name.clone(), pos, dia: rules.via_dia, drill: rules.via_drill });
+    }
+    out
+}
+
+/// Fold slivers (pieces under 20 um left by smoothing and rounding) into a straight
+/// neighbour, keeping the chain of end points continuous. A board full of
+/// micrometre segments is hard to edit by hand.
+fn merge_slivers(prims: Vec<(Prim, f64)>) -> Vec<(Prim, f64)> {
+    const MIN: f64 = 0.02;
+    let len = |p: &Prim| match p {
+        Prim::Seg(a, b) => a.dist(*b),
+        Prim::Arc(a) => a.len(),
+    };
+    let ends = |p: &Prim| match p {
+        Prim::Seg(a, b) => (*a, *b),
+        Prim::Arc(a) => (a.start(), a.end()),
+    };
+    let mut src: std::collections::VecDeque<(Prim, f64)> = prims.into();
+    let mut out: Vec<(Prim, f64)> = Vec::new();
+    while let Some((p, w)) = src.pop_front() {
+        if len(&p) >= MIN || (out.is_empty() && src.is_empty()) {
+            out.push((p, w));
+            continue;
+        }
+        let (s, e) = ends(&p);
+        if let Some((Prim::Seg(a, _), w2)) = src.front().copied() {
+            // the next straight piece starts where the sliver started
+            let (_, b) = ends(&src.front().unwrap().0);
+            let _ = a;
+            src[0] = (Prim::Seg(s, b), w2);
+        } else if let Some((Prim::Seg(a, _), w2)) = out.last().copied() {
+            let n = out.len();
+            out[n - 1] = (Prim::Seg(a, e), w2);
+        } else {
+            out.push((p, w));
+        }
     }
     out
 }
