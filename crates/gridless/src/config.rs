@@ -32,10 +32,6 @@ use crate::kicad::glob_match;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
@@ -58,6 +54,10 @@ pub enum OrderMode {
     Short,
     /// try Width, Cost and Short and keep the best by DRC score
     Auto,
+    /// a designer's order: short links that cannot change layer (an SMD pad on each
+    /// end, one common layer), then power nets, then the rest by length; links that need
+    /// a via whatever happens (SMD pads on different layers) last
+    Logic,
 }
 
 impl OrderMode {
@@ -67,6 +67,7 @@ impl OrderMode {
             OrderMode::Cost => "cost",
             OrderMode::Short => "short",
             OrderMode::Auto => "auto",
+            OrderMode::Logic => "logic",
         }
     }
 }
@@ -200,13 +201,12 @@ pub struct Config {
     /// the pad the MST planned (dynamic terminals: Prim over components)
     pub dynamic_terminals: Option<bool>,
     /// leave rectangular pads through the midpoint of the edge the track heads for
-    /// (90 degree exit); costs extra length and some clearance, so it is off by default
-    #[serde(default)]
-    pub pad_exit: bool,
+    /// (90 degree exit, as a designer does); each exit is checked against the clearance
+    /// rules and dropped where it would cost one
+    pub pad_exit: Option<bool>,
     /// add via_cost to the MST edge when the two pads share no signal layer; off
     /// makes the tree purely geometric (fewer layer changes, but more pour cuts)
-    #[serde(default = "default_true")]
-    pub mst_via_cost: bool,
+    pub mst_via_cost: Option<bool>,
     /// while cleaning up a detour, multiply the layer direction weight by this
     /// (0 = off, 0.15 = nearly ignore the preferred direction for that re-route)
     pub detour_relax: Option<f64>,
@@ -221,6 +221,13 @@ pub struct Config {
     pub ridge_range: Option<f64>,
     /// grid step (mm) of the distance field
     pub ridge_step: Option<f64>,
+    /// contour map: cost per millimetre of track at unit height of the terrain, where
+    /// foreign copper is a hill (0 = off)
+    pub terrain: Option<f64>,
+    /// fall-off (mm) of a hill beyond the clearance band
+    pub terrain_sigma: Option<f64>,
+    /// cost (mm) of a via per unit of terrain height at its site (mean of both layers)
+    pub terrain_via: Option<f64>,
     /// router effort: number of negotiation iterations
     pub iterations: Option<usize>,
     pub seed: Option<u64>,
@@ -321,6 +328,9 @@ pub struct Rules {
     pub order: OrderMode,
     pub ridge_range: f64,
     pub ridge_step: f64,
+    pub terrain: f64,
+    pub terrain_sigma: f64,
+    pub terrain_via: f64,
     pub force_fanout: Vec<String>,
     pub iterations: usize,
     pub seed: u64,
@@ -477,7 +487,7 @@ impl Rules {
             nets,
             via_dia,
             via_drill,
-            via_cost: cfg.via.cost.unwrap_or(6.0),
+            via_cost: cfg.via.cost.unwrap_or(12.0),
             diff_pairs,
             length_groups,
             centering,
@@ -491,14 +501,17 @@ impl Rules {
             ridge_cost: cfg.ridge_cost.unwrap_or(0.0),
             center_gap: cfg.center_gap.unwrap_or(0.0),
             dynamic_terminals: cfg.dynamic_terminals.unwrap_or(false),
-            pad_exit: cfg.pad_exit,
-            mst_via_cost: cfg.mst_via_cost,
+            pad_exit: cfg.pad_exit.unwrap_or(true),
+            mst_via_cost: cfg.mst_via_cost.unwrap_or(true),
             detour_relax: cfg.detour_relax.unwrap_or(0.0),
             same_layer_bias: cfg.same_layer_bias.unwrap_or(1.0),
             short_link: cfg.short_link.unwrap_or(3.0),
-            order: cfg.order.unwrap_or(OrderMode::Width),
+            order: cfg.order.unwrap_or(OrderMode::Logic),
             ridge_range: cfg.ridge_range.unwrap_or(1.2),
             ridge_step: cfg.ridge_step.unwrap_or(0.25),
+            terrain: cfg.terrain.unwrap_or(1.5),
+            terrain_sigma: cfg.terrain_sigma.unwrap_or(0.5),
+            terrain_via: cfg.terrain_via.unwrap_or(2.0),
             force_fanout: cfg.force_fanout.clone(),
             iterations: cfg.iterations.unwrap_or(40),
             seed: cfg.seed.unwrap_or(1),

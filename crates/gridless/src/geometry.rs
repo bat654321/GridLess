@@ -1784,7 +1784,7 @@ pub struct Geometry {
 /// With two neighbours every point of the segment gives the same wire length, so the
 /// closest point to the lattice site wins: that is exactly what removes the horseshoe
 /// without making the net longer. With more neighbours the median shortens it.
-fn relax_via_positions(r: &Router, pb: &Problem, rules: &Rules, used: &mut [(u32, P, NetId)]) {
+fn relax_via_positions(r: &Router, pb: &Problem, rules: &Rules, used: &mut [(u32, P, NetId)], emb: &[crate::topo::EmbeddedWire]) {
     let mut nb: Vec<Vec<P>> = vec![Vec::new(); pb.sites.len()];
     for w in &r.st.wires {
         if !w.alive {
@@ -1845,6 +1845,15 @@ fn relax_via_positions(r: &Router, pb: &Problem, rules: &Rules, used: &mut [(u32
             if d0 > move_cap || d0 < 1e-6 || !via_spot_ok(pb, rules, q, net, &others) {
                 continue;
             }
+            // the topology placed every other wire on one side of the via: moving the
+            // via across a foreign wire would wrap that wire around the new spot
+            let crosses = emb.iter().any(|ew| {
+                let w = &r.st.wires[ew.wire as usize];
+                w.net != net && ew.pts.windows(2).any(|s| crate::geom::segs_intersect(q0, q, s[0], s[1]) || crate::geom::seg_seg_dist(q0, q, s[0], s[1]) < 1e-3)
+            });
+            if crosses {
+                continue;
+            }
             let score = points.iter().map(|p| p.dist(q)).sum::<f64>() + 0.02 * d0;
             if best.map_or(true, |(_, s)| score < s) {
                 best = Some((q, score));
@@ -1879,7 +1888,7 @@ pub fn realize(r: &Router, pb: &Problem, rules: &Rules) -> Geometry {
     // horseshoe) instead of pulling it straight. Put each via on that line, two
     // neighbours, or at their median for more, keeping it clear of foreign copper.
     if std::env::var("GRIDLESS_NO_VIA_RELAX").is_err() {
-        relax_via_positions(r, pb, rules, &mut used);
+        relax_via_positions(r, pb, rules, &mut used, &emb);
     }
     // layers are independent: one thread each
     use rayon::prelude::*;

@@ -17,3 +17,4 @@ pub mod smooth;
 pub mod stitch;
 pub mod topo;
 pub mod tuning;
+pub mod terrain;

@@ -175,9 +175,10 @@ impl Problem {
         let mut obstacles = Vec::new();
         for (i, pd) in b.pads.iter().enumerate() {
             let layers = if pd.kind == PadKind::Npth { all_cu.clone() } else { pd.layers.clone() };
-            // NPTH: hole only, copper-free; model the hole as an obstacle on all layers
-            let shape = if pd.kind == PadKind::Npth && pd.layers.is_empty() {
-                RoundPoly::circle(pd.pos, pd.drill.unwrap_or(0.0) / 2.0)
+            // NPTH: hole only, copper-free; model the hole as an obstacle on all layers,
+            // grown so that the copper clearance around it meets the hole clearance rule
+            let shape = if pd.kind == PadKind::Npth && (pd.layers.is_empty() || pd.drill.is_some()) {
+                RoundPoly::circle(pd.pos, pd.drill.unwrap_or(0.0) / 2.0 + (rules.hole_clearance - rules.default_clearance).max(0.0))
             } else {
                 pd.shape.clone()
             };

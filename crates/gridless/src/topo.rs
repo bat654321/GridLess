@@ -101,6 +101,8 @@ pub struct Router<'a> {
     dir_scale: f64,
     /// distance field to copper per layer (empty when the ridge pull is off)
     field: Vec<Field>,
+    /// contour map (None when off)
+    terrain: Option<crate::terrain::Terrain>,
 }
 
 /// How many millimetres of ordinary track one millimetre through a pour pad's escape
@@ -216,7 +218,38 @@ impl<'a> Router<'a> {
             Vec::new()
         };
         let st = State { wires: Vec::new(), free_wires: Vec::new(), conns: vec![ConnState::default(); pb.conns.len()], layers, site_use: vec![None; pb.sites.len()] };
-        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v, dir_scale: 1.0, field }
+        let terrain = if rules.terrain > 0.0 {
+            let t = crate::terrain::Terrain::build(pb, &pb.route_layers, rules.default_clearance, rules.terrain_sigma);
+            if let Ok(prefix) = std::env::var("GRIDLESS_TERRAIN_PNG") {
+                for li in 0..pb.route_layers.len() {
+                    let name = &board.layers[pb.route_layers[li]].name;
+                    let _ = t.save_png(li, std::path::Path::new(&format!("{prefix}_{name}.png")), 16.0);
+                }
+            }
+            Some(t)
+        } else {
+            None
+        };
+        Router { board, pb, rules, meshes, st, via_r: rules.via_dia / 2.0, stats: RouteStats::default(), queue: VecDeque::new(), pres_fac: 1.0, rip_base: 25.0, via_scale: 1.0, protect_pairs: false, hist, reserve: vec![0.0; pb.conns.len()], pour_e, pour_v, dir_scale: 1.0, field, terrain }
+    }
+
+    /// Climbing cost of the step a-b on layer li for a wire of `net` (contour map).
+    fn terrain_cost(&self, li: usize, a: P, b: P, net: NetId) -> f64 {
+        match &self.terrain {
+            Some(t) => self.rules.terrain * a.dist(b) * t.mean(li, a, b, Some(net)),
+            None => 0.0,
+        }
+    }
+
+    /// Cost of a via at q (mean terrain height of all routing layers there).
+    fn terrain_via_cost(&self, q: P, net: NetId) -> f64 {
+        match &self.terrain {
+            Some(t) => {
+                let n = self.meshes.len().max(1);
+                self.rules.terrain_via * (0..self.meshes.len()).map(|li| t.at(li, q, Some(net))).sum::<f64>() / n as f64
+            }
+            None => 0.0,
+        }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -1093,7 +1126,7 @@ impl<'a> Router<'a> {
                                             let d = via_targets.iter().map(|t| t.dist(self.pb.sites[s as usize].pos)).fold(f64::INFINITY, f64::min);
                                             via_cost * (d / 0.5).min(4.0)
                                         };
-                                        let g = nd.g + if reuse { 0.5 } else { via_cost } + pen + pair_off + if lay_k(lj) > 1.0 { via_cost * 4.0 } else { 0.0 };
+                                        let g = nd.g + if reuse { 0.5 } else { via_cost + self.terrain_via_cost(self.pb.sites[s as usize].pos, net) } + pen + pair_off + if lay_k(lj) > 1.0 { via_cost * 4.0 } else { 0.0 };
                                         push(&mut nodes, &mut open, &mut best, SKey::Vert(lj as u8, vj), g, nd.pos, NONE, &[], lj, 0.0);
                                     }
                                 }
@@ -1123,7 +1156,7 @@ impl<'a> Router<'a> {
                                 let q = self.best_point(li, eo, lo, hi, nd.pos, goal_near(li, nd.pos));
                                 let step = nd.pos.dist(q);
                                 let mut cost = step * self.dir_factor(li, nd.pos, q) * attract(li, eo, g) * lay_k(li);
-                                cost += step * self.ridge_fac(li, q);
+                                cost += step * self.ridge_fac(li, q) + self.terrain_cost(li, nd.pos, q, net);
                                 cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                                 cost += over * 60.0 * self.pres_fac + neck * 15.0 + self.hist[li][eo as usize] as f64 * hist_k;
                                 cost += POUR_COST * self.pour_e[li][eo as usize] as f64 * nd.pos.dist(q);
@@ -1142,7 +1175,7 @@ impl<'a> Router<'a> {
                             let q = m.verts[u as usize].pos;
                             let step = nd.pos.dist(q);
                             let mut cost = step * self.dir_factor(li, nd.pos, q) * lay_k(li);
-                            cost += step * self.ridge_fac(li, q);
+                            cost += step * self.ridge_fac(li, q) + self.terrain_cost(li, nd.pos, q, net);
                             cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                             cost += end_pen.get(&(li, u)).copied().unwrap_or(0.0);
                             cost += POUR_COST * self.pour_v[li][u as usize] as f64 * nd.pos.dist(q);
@@ -1170,6 +1203,7 @@ impl<'a> Router<'a> {
                             let (lo, hi, over, xw, neck) = self.fit_gap(li, e2, g, width, wmin, clr, c);
                             let q = self.best_point(li, e2, lo, hi, nd.pos, goal_near(li, nd.pos));
                             let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * attract(li, e2, g) * lay_k(li);
+                            cost += self.terrain_cost(li, nd.pos, q, net);
                             cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                             cost += over * 60.0 * self.pres_fac + neck * 15.0 + self.hist[li][e2 as usize] as f64 * hist_k;
                             cost += POUR_COST * self.pour_e[li][e2 as usize] as f64 * nd.pos.dist(q);
@@ -1185,6 +1219,7 @@ impl<'a> Router<'a> {
                         self.crossings(li, t, pa, cj as f64, c, &mut crossed);
                         let q = m.verts[u as usize].pos;
                         let mut cost = nd.pos.dist(q) * self.dir_factor(li, nd.pos, q) * lay_k(li);
+                        cost += self.terrain_cost(li, nd.pos, q, net);
                         cost += crossed.iter().map(|&w| self.wire_cost(w)).sum::<f64>();
                         cost += end_pen.get(&(li, u)).copied().unwrap_or(0.0);
                         push(&mut nodes, &mut open, &mut best, SKey::Vert(li8, u), nd.g + cost, q, t, &crossed, li, 0.0);
@@ -1546,9 +1581,36 @@ impl<'a> Router<'a> {
         let pb = self.pb;
         let short = self.rules.short_link.max(0.0);
         let mode = self.rules.order;
+        let board = self.board;
+        let rules = self.rules;
+        let default_w = board.classes.first().map_or(0.0, |c| c.track_width);
+        // designer's category of a link (lower goes first)
+        let logic_cat = |c: &crate::problem::Conn| -> u8 {
+            if c.couple.is_some() || matches!(c.kind, ConnKind::Pair { .. }) {
+                return 0;
+            }
+            let (pa, pb_) = match (c.a, c.b) {
+                (Term::Pad(x), Term::Pad(y)) => (&board.pads[x], &board.pads[y]),
+                _ => return 2, // fanout to a plane
+            };
+            let sig = |l: &usize| rules.layers[*l].role == crate::config::LayerRole::Signal;
+            let common = pa.layers.iter().any(|l| sig(l) && pb_.layers.contains(l));
+            let smd = |p: &crate::board::Pad| p.kind == crate::board::PadKind::Smd;
+            let power = c.priority > 0 || c.width > default_w + 1e-6;
+            if common && (smd(pa) || smd(pb_)) && c.est_len <= short {
+                1 // a layer change can only make it worse: route it first, where it is
+            } else if power {
+                2
+            } else if common || !smd(pa) || !smd(pb_) {
+                3
+            } else {
+                4 // SMD pads on different layers: a via is inevitable anyway
+            }
+        };
         order.sort_by(|&a, &b| {
             let (ca, cb) = (&pb.conns[a], &pb.conns[b]);
             match mode {
+                crate::config::OrderMode::Logic => logic_cat(ca).cmp(&logic_cat(cb)).then(ca.est_len.partial_cmp(&cb.est_len).unwrap()),
                 // short links that need no new via first, then power nets, then the rest
                 crate::config::OrderMode::Cost => {
                     let cat = |c: &crate::problem::Conn| -> u8 {
@@ -1659,7 +1721,7 @@ impl<'a> Router<'a> {
             portals.push(if fwd { (phi, plo) } else { (plo, phi) });
         }
         let path = crate::geometry::funnel(m.verts[w.start as usize].pos, m.verts[w.end as usize].pos, &portals);
-        path.windows(2).map(|s| s[0].dist(s[1]) * self.dir_factor(w.li, s[0], s[1])).sum()
+        path.windows(2).map(|s| s[0].dist(s[1]) * self.dir_factor(w.li, s[0], s[1]) + self.terrain_cost(w.li, s[0], s[1], w.net)).sum()
     }
 
     /// Quality score of a routed connection (lower is better).
