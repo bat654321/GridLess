@@ -8,6 +8,13 @@
 # pour_keepout = 0.45       # mm around a pad the pour must reach: signals pay extra there
 #                          # so they cannot cut the pour away from the pad (0 = off)
 # iterations = 40          # negotiation iterations of the topological router
+# order = "logic"          # knots of short links first, then power, then the rest;
+#                          # also "width", "cost", "short", "auto"
+# short_link = 3.0         # mm: a "short" same-layer link
+# terrain = 1.5            # contour map: cost of climbing over foreign copper (0 = off)
+# terrain_sigma = 0.5      # mm: fall-off of a hill beyond the clearance band
+# terrain_via = 2.0        # mm per unit of height at a via site
+# pad_exit = true          # leave rectangular pads at 90 degrees to the edge
 # length_reserve = "auto"  # room for length-matching meanders kept free already in the
 #                          # topology (as in TopoR): "auto" = only when plain routing leaves
 #                          # a length group short, "always", or "off"
@@ -28,7 +35,7 @@ cost = 1.2                 # >1 discourages the layer
 [via]
 diameter = 0.5
 drill = 0.3
-cost = 6.0                 # how many mm of track one via is worth
+cost = 12.0                # how many mm of track one via is worth
 
 # ---- per-net rules (glob patterns); later entries override earlier ones
 [[nets]]

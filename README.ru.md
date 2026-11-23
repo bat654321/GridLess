@@ -15,7 +15,8 @@ GridLess — автотрассировщик в духе TopoR для KiCad 10:
 * встроенная проверка DRC и обратная связь «DRC → перекладка».
 
 Почему так устроено и что взято из TopoR, Situs, SPECCTRA, Freerouting, Topola и др. —
-см. [docs/ANALYSIS.md](docs/ANALYSIS.md).
+см. [docs/ANALYSIS.md](docs/ANALYSIS.md). Полная справка о возможностях, алгоритмах и
+параметрах — [docs/REFERENCE.ru.md](docs/REFERENCE.ru.md).
 
 ## Сборка
 

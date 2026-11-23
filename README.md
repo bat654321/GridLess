@@ -186,7 +186,8 @@ range = 3.25     # mm; default 5 channels
 - Differential-pair vias are placed side by side across the pair direction.
 
 See the [analysis](docs/ANALYSIS.md) for the ideas taken from TopoR, Situs,
-SPECCTRA, Freerouting, Topola and others.
+SPECCTRA, Freerouting, Topola and others, and the
+[reference (Russian)](docs/REFERENCE.ru.md) for every feature, algorithm and setting.
 
 ## How it works
 

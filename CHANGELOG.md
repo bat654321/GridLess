@@ -8,6 +8,17 @@ All notable changes to GridLess are recorded here. The format follows
 
 ### Added
 
+- Contour map (`terrain`, on by default): foreign copper is a hill, the path search
+  pays for climbing. Tracks run between groups of pads, leave pin rows square to them,
+  take the long run on the free layer and drop the via near the crowded end.
+- Connection order `logic` (default): knots of short links (a part with its close
+  neighbours) first, densest first; then short same-layer links, power, the rest;
+  SMD-to-SMD links on different layers last.
+- `route --stitch`: join pour islands and reach pads the pour misses right after
+  routing. `render --no-fills --nets A,B` for looking at the result.
+- Reference of features and algorithms: `docs/REFERENCE.ru.md`; bench scripts for
+  comparing with a hand-routed board: `tools/bench`.
+
 - `gridless stitch <board>`: join the copper islands of a net's pours with vias.
   It refills the zones through `kicad-cli` first (so the islands are the ones the
   router actually leaves), builds the island graph from pads, tracks and vias,
@@ -24,6 +35,13 @@ All notable changes to GridLess are recorded here. The format follows
 
 ### Changed
 
+- Defaults: `pad_exit` on (90 degree exits from rectangular pads), via cost 12 mm.
+- A part is fine-pitch when a track does not fit between its pins (not by pad width);
+  a pin joined to the pin across its own part leaves inwards.
+- A via no longer moves across a foreign wire (that produced hairpins).
+- A finishing stage that leaves a net unconnected is undone; a net the geometry left
+  in pieces is re-routed in the next round.
+- NPTH holes keep the hole clearance; slivers under 20 um are merged on output.
 - Gap equalisation is no longer dropped for a whole layer when it costs a rule:
   it retries at 50 % and 25 % of the pull, so a dense cluster keeps most of the
   centring instead of losing all of it.
