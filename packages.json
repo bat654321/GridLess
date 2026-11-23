@@ -34,6 +34,21 @@
       ],
       "versions": [
         {
+          "version": "0.2.0",
+          "status": "testing",
+          "kicad_version": "10.0",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "runtime": "ipc",
+          "download_url": "https://github.com/bat654321/GridLess/releases/download/v0.2.0/gridless-0.2.0-pcm.zip",
+          "download_sha256": "3db9ef9d7cfeee753b4f59c9a9db28e744057a167b22b93f3489801063837b7e",
+          "download_size": 15402958,
+          "install_size": 55970383
+        },
+        {
           "version": "0.1.0",
           "status": "testing",
           "kicad_version": "10.0",

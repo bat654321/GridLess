@@ -10,9 +10,9 @@
   },
   "packages": {
     "url": "https://bat654321.github.io/GridLess/packages.json",
-    "sha256": "89e9b5b91f78a604c1bea2adf8e158d2d5df797fd5354914355e1cdc4250146b",
-    "update_timestamp": 1795266546,
-    "update_time_utc": "2026-11-21 13:09:06"
+    "sha256": "ac273b1491338200b391d8d6d7d4dfe5f951021a2fcf6de6aaea392f811ab104",
+    "update_timestamp": 1795449767,
+    "update_time_utc": "2026-11-23 16:02:47"
   },
   "resources": {
     "url": "https://bat654321.github.io/GridLess/resources.zip",
