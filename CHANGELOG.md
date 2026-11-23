@@ -4,7 +4,7 @@ All notable changes to GridLess are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions use
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-11-23
 
 ### Added
 
@@ -16,7 +16,8 @@ All notable changes to GridLess are recorded here. The format follows
   SMD-to-SMD links on different layers last.
 - `route --stitch`: join pour islands and reach pads the pour misses right after
   routing. `render --no-fills --nets A,B` for looking at the result.
-- Reference of features and algorithms: `docs/REFERENCE.ru.md`; bench scripts for
+- Reference of features and algorithms: `docs/REFERENCE.md` (English) and
+  `docs/REFERENCE.ru.md` (Russian); bench scripts for
   comparing with a hand-routed board: `tools/bench`.
 
 - `gridless stitch <board>`: join the copper islands of a net's pours with vias.

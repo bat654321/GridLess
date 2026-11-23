@@ -187,7 +187,7 @@ range = 3.25     # mm; default 5 channels
 
 See the [analysis](docs/ANALYSIS.md) for the ideas taken from TopoR, Situs,
 SPECCTRA, Freerouting, Topola and others, and the
-[reference (Russian)](docs/REFERENCE.ru.md) for every feature, algorithm and setting.
+[reference](docs/REFERENCE.md) for every feature, algorithm and setting.
 
 ## How it works
 
